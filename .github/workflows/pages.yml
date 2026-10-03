@@ -1,8 +1,5 @@
 name: Publish download site
 on:
-  push:
-    branches: [main]
-    paths: ['site/**', 'scripts/build_site.py', '.github/workflows/pages.yml']
   workflow_dispatch:
 permissions:
   contents: read

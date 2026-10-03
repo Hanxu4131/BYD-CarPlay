@@ -66,7 +66,8 @@ object AppLocale {
             return context
         }
         val locale = locale(preference(context)) ?: return context
-        val configuration = Configuration(context.resources.configuration).apply {
+        // Override only language: copying the whole configuration pins night mode and display metrics.
+        val configuration = Configuration().apply {
             setLocale(locale)
             setLayoutDirection(locale)
         }

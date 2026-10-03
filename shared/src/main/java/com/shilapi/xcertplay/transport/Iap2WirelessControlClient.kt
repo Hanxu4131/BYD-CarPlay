@@ -5,6 +5,7 @@ import com.shilapi.xcertplay.iap2.message.Iap2WirelessMessages
 import com.shilapi.xcertplay.iap2.message.Iap2WirelessSessionParameters
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
+import com.shilapi.xcertplay.diagnostics.CarPlayNegotiationSummary
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import kotlin.math.min
 
@@ -158,10 +159,12 @@ class Iap2WirelessControlClient(
 
                     CARPLAY_AVAILABILITY -> {
                         onProgress("iap2 rx=0x4300 carplay-availability")
-                        send(carPlayStartSession(endpoint), deadlineNanos)
+                        onProgress("iap2 4300 ${CarPlayNegotiationSummary.availability(incoming.payload)}")
+                        val startSession = carPlayStartSession(endpoint)
+                        send(startSession, deadlineNanos)
                         stage = later(stage, Iap2WirelessControlStage.CARPLAY_START_SENT)
                         carPlayStartSessionsSent++
-                        onProgress("iap2 tx=0x4301 carplay-start-session")
+                        onProgress("iap2 tx=0x4301 carplay-start-session ${CarPlayNegotiationSummary.startSession(startSession)}")
                     }
 
                     WIRELESS_CARPLAY_UPDATE -> {

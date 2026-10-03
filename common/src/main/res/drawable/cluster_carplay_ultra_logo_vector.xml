@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Neutral loading geometry for the public adaptation; no Apple artwork. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="584dp" android:height="98dp" android:viewportWidth="584" android:viewportHeight="98">
+    <path android:fillColor="#00000000" android:strokeColor="#FFFFFFFF" android:strokeWidth="5" android:pathData="M49,8 A41,41 0,1 1,48.9,8"/>
+    <path android:fillColor="#FFFFFFFF" android:pathData="M39,27 L68,49 L39,71 Z"/>
+</vector>

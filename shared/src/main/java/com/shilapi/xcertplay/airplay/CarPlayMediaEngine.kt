@@ -15,8 +15,10 @@ data class AudioStreamId(val type: Int, val audioType: String)
 
 /** Rendering seam for the decrypted CarPlay media streams. */
 interface MediaSink {
+    val adaptiveMainViewportEnabled: Boolean get() = false
     fun onVideoCodec(type: Int, codec: VideoCodec) {}
     fun onVideoConfig(type: Int, codecData: ByteArray) {}
+    fun onVideoGeometry(type: Int, codec: VideoCodec, geometry: MainAreaViewport?) {}
     fun onVideoFrame(type: Int, naluBytes: ByteArray) {}
     fun setVideoRecoveryHandler(type: Int, handler: () -> Unit) {}
     fun setVideoDiagnosticHandler(type: Int, handler: (String) -> Unit) {}
@@ -52,6 +54,7 @@ class CarPlayMediaEngine(
         val playoutLatencyMs: Int,
         @Volatile var firstSample: Int? = null,
         @Volatile var originNs: Long? = null,
+        @Volatile var lastFeedbackDiagnosticNs: Long = 0L,
     )
 
     private data class PendingIapTunnel(
@@ -60,6 +63,7 @@ class CarPlayMediaEngine(
     )
 
     private val streams = ConcurrentHashMap<StreamKey, Closeable>()
+    private val adaptiveScreens = ConcurrentHashMap<Int, ScreenStream>()
     private val audioMeta = ConcurrentHashMap<StreamKey, AudioMeta>()
     private val pendingMicrophone = ConcurrentHashMap<StreamKey, MicrophoneConfig>()
     private val audioCaptures = ConcurrentHashMap<StreamKey, AudioPacketCapture>()
@@ -93,24 +97,33 @@ class CarPlayMediaEngine(
                 session.logDebug("Video recovery: requested keyframe sent=$sent")
             }
         }
+        val adaptive = type == STREAM_TYPE_MAIN_SCREEN && sink.adaptiveMainViewportEnabled
+        if (adaptive) {
+            adaptiveScreens[type] = screen
+            streams.put(streamKey, screen)?.close()
+        }
+        fun current(): Boolean = !adaptive || (streams[streamKey] === screen && adaptiveScreens[type] === screen)
         val port = screen.listen(
             object : ScreenStream.Listener {
-                override fun onCodec(codec: VideoCodec) = sink.onVideoCodec(type, codec)
-                override fun onConfig(codecData: ByteArray) = sink.onVideoConfig(type, codecData)
-                override fun onFrame(naluBytes: ByteArray) = sink.onVideoFrame(type, naluBytes)
+                override fun onGeometry(codec: VideoCodec, geometry: MainAreaViewport?) {
+                    if (current()) sink.onVideoGeometry(type, codec, geometry)
+                }
+                override fun onCodec(codec: VideoCodec) { if (current()) sink.onVideoCodec(type, codec) }
+                override fun onConfig(codecData: ByteArray) { if (current()) sink.onVideoConfig(type, codecData) }
+                override fun onFrame(naluBytes: ByteArray) { if (current()) sink.onVideoFrame(type, naluBytes) }
                 override fun onClosed(cause: Throwable?) {
                     Log.w(
                         TAG,
                         "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
                     )
-                    if (streams.remove(streamKey, screen)) {
+                    if (streams.remove(streamKey, screen) && (!adaptive || adaptiveScreens.remove(type, screen))) {
                         sink.onScreenStreamActive(type, false)
                     }
                     session.close()
                 }
             },
         )
-        streams.put(streamKey, screen)?.close()
+        if (!adaptive) streams.put(streamKey, screen)?.close()
         sink.onScreenStreamActive(type, true)
         return port
     }
@@ -142,6 +155,9 @@ class CarPlayMediaEngine(
         val connectionId = stream["streamConnectionID"]
         val latencyMs = (stream["audioLatencyMs"] as? Number)?.toInt() ?: 0
         val meta = AudioMeta(type, format, connectionId, latencyMs)
+        val timing = "Audio timing: type=$type audioType=$audioType advertisedLatencyMs=$latencyMs"
+        session.logDebug(timing)
+        Log.w(TAG, timing)
         val microphone = microphoneConfig(session, type, stream, format)
         if (microphone != null) pendingMicrophone[streamKey] = microphone
 
@@ -307,6 +323,11 @@ class CarPlayMediaEngine(
                 entry["timestamp"] = session.syncedNtp()
                 entry["timestampRawNs"] = nowNs
                 entry["sampleTime"] = sampleTime
+                if (meta.lastFeedbackDiagnosticNs == 0L || nowNs - meta.lastFeedbackDiagnosticNs >= 30_000_000_000L) {
+                    meta.lastFeedbackDiagnosticNs = nowNs
+                    session.logDebug("Audio feedback: type=${meta.type} advertisedLatencyMs=${meta.playoutLatencyMs} " +
+                        "sinceFirstPacketMs=${(nowNs - originNs) / 1_000_000L} sampleAdvance=${(sampleTime - firstUnsigned) and 0xffff_ffffL}")
+                }
             }
             entry
         }
@@ -317,6 +338,10 @@ class CarPlayMediaEngine(
         if (type == STREAM_TYPE_DATA) clearPendingIapTunnel(session)
         // TEARDOWN carries only the stream type; release every audioType variant of it.
         val tornDown = streams.keys.filter { it.session === session && it.type == type }
+        val clearAdaptive = type != STREAM_TYPE_MAIN_SCREEN || !sink.adaptiveMainViewportEnabled || tornDown.any {
+            val screen = streams[it]
+            screen is ScreenStream && adaptiveScreens.remove(type, screen)
+        }
         tornDown.forEach { key ->
             val streamId = AudioStreamId(key.type, key.audioType)
             if (pendingMicrophone.remove(key) != null) sink.onMicrophoneStopped(streamId)
@@ -325,7 +350,7 @@ class CarPlayMediaEngine(
             sink.onAudioStopped(streamId)
             streams.remove(key)?.close()
         }
-        if (isScreenStreamType(type)) sink.onScreenStreamActive(type, false)
+        if (isScreenStreamType(type) && clearAdaptive) sink.onScreenStreamActive(type, false)
     }
 
     override fun onSessionClosed(session: AirPlaySession) {
@@ -334,7 +359,11 @@ class CarPlayMediaEngine(
         val sessionStreams = streams.keys.filter { it.session === session }
         sessionStreams
             .filter { isScreenStreamType(it.type) }
-            .forEach { sink.onScreenStreamActive(it.type, false) }
+            .forEach {
+                val screen = streams[it]
+                if (it.type != STREAM_TYPE_MAIN_SCREEN || !sink.adaptiveMainViewportEnabled ||
+                    (screen is ScreenStream && adaptiveScreens.remove(it.type, screen))) sink.onScreenStreamActive(it.type, false)
+            }
         sessionStreams.forEach { streams.remove(it)?.close() }
         audioMeta.clear()
         pendingMicrophone.clear()

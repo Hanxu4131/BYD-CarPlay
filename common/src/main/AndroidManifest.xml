@@ -14,6 +14,7 @@
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
     <!-- The centre card also follows whichever launcher is the default home. -->
     <queries>
+        <package android:name="l1tech.com.l1mini" />
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.HOME" />
@@ -22,6 +23,8 @@
     <application>
         <activity android:name="com.shilapi.xcertplay.DiPlayActivity"
             android:exported="true" android:launchMode="singleTop"
+            android:allowEmbedded="true"
+            android:resizeableActivity="true"
             android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:theme="@style/Theme.Xcertplay">
             <intent-filter>
@@ -37,6 +40,7 @@
             android:configChanges="density|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
             android:exported="true"
             android:launchMode="singleTask"
+            android:allowEmbedded="true"
             android:resizeableActivity="true"
             android:screenOrientation="fullSensor"
             android:theme="@style/Theme.Xcertplay"
@@ -48,6 +52,13 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/usb_device_filter" />
         </activity>
+
+        <activity android:name="com.shilapi.xcertplay.ClusterMapActivity"
+            android:exported="true" android:excludeFromRecents="true"
+            android:taskAffinity="${applicationId}.legacycluster"
+            android:resizeableActivity="true"
+            android:configChanges="density|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:theme="@style/Theme.LegacyClusterMap" />
 
         <activity
             android:name="com.shilapi.xcertplay.CarPlayVideoActivity"

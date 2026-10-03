@@ -7,7 +7,7 @@ import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 object BydNavigationOutputs {
     /** Recover a journaled interrupted output when the app opens, even before a phone reconnects. */
     fun onAppOpened(context: Context) {
-        if (BydStandaloneHudOutput.available(context)) start(context)
+        if (BydStandaloneHudOutput.available(context)) start(context, sessionStarted = false)
         // Read the battery early, so a reading is ready when CarPlay identifies (see batteryStatus).
         if (BydOutputSettings.batteryToIphone(context)) BydBatteryStatus.start(context)
     }
@@ -40,7 +40,7 @@ object BydNavigationOutputs {
     /** Whether the car is in P (read over adb), or null when it cannot tell. Blocking. */
     fun parked(context: Context): Boolean? = BydParkedState.parked(context.applicationContext)
 
-    fun start(context: Context) {
+    fun start(context: Context, sessionStarted: Boolean = true) {
         val app = context.applicationContext
         useStandalone = BydStandaloneHudOutput.available(app)
         if (useStandalone) standalone.start { BydStandaloneNavigationBridge.initialize(app) }
@@ -49,7 +49,7 @@ object BydNavigationOutputs {
             cluster.start { BydClusterBridge.initialize(app) }
         }
         BydClusterMapPause.initialize(app)
-        BydClusterSong.attach(app)
+        BydClusterSong.attach(app, sessionStarted)
     }
 
     internal fun onFrame(frame: Iap2Frame) {
@@ -68,7 +68,7 @@ object BydNavigationOutputs {
     }
 
     /** The dashboard song setting changed; applies at once. */
-    fun clusterSongChanged(enabled: Boolean) = BydClusterSong.settingChanged(enabled)
+    fun clusterSongChanged() = BydClusterSong.settingChanged()
 
     /** Best effort while alive; Android does not guarantee callbacks before force-stop. */
     fun endNow() { standalone.clear(); hud.clear(); cluster.clear(); BydClusterSong.end() }

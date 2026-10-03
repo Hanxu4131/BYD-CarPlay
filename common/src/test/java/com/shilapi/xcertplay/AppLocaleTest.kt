@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.app.LocaleManager
+import android.content.res.Configuration
 import android.content.Context
 import android.os.LocaleList
 import android.view.View
@@ -46,6 +47,22 @@ class AppLocaleTest {
         AppLocale.wrap(context)
         assertEquals(AppLocale.SIMPLIFIED_CHINESE, AppLocale.preference(context))
         assertEquals("zh-CN", manager.applicationLocales.toLanguageTags())
+    }
+
+    @Test @Config(sdk = [29])
+    fun languageOverrideKeepsFollowingLiveSystemNightMode() {
+        RuntimeEnvironment.setQualifiers("+notnight")
+        AppLocale.save(context, AppLocale.SIMPLIFIED_CHINESE)
+        val wrapped = AppLocale.wrap(context)
+        assertEquals(Configuration.UI_MODE_NIGHT_NO,
+            wrapped.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
+        RuntimeEnvironment.setQualifiers("+night")
+        assertEquals(Configuration.UI_MODE_NIGHT_YES,
+            wrapped.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
+        assertEquals(Locale.SIMPLIFIED_CHINESE.language, wrapped.resources.configuration.locales[0].language)
+        RuntimeEnvironment.setQualifiers("+notnight")
+        assertEquals(Configuration.UI_MODE_NIGHT_NO,
+            wrapped.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK)
     }
 
     @Test @Config(sdk = [28, 32])

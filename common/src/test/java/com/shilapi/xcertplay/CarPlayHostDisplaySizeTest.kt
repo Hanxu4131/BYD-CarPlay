@@ -8,6 +8,7 @@ import android.view.TextureView
 import android.view.View
 import com.shilapi.xcertplay.airplay.*
 import com.shilapi.xcertplay.media.AndroidMediaSink
+import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.media.CarPlayVideoLayout
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
@@ -71,20 +72,48 @@ class CarPlayHostDisplaySizeTest {
         assertEquals(1, keepLogs())
     }
 
-    @Test fun connectingInANarrowWindowRebuildsWhenTheCameraCloses() {
-        startSession(windowWidth = 700)
-        applySize(1920, 990)
-        assertEquals(size(1920, 990), getField("activeDisplaySize"))
-        assertEquals(1, getField("restartGeneration"))
-        assertTrue(getField("handshakeResetInProgress") as Boolean)
-        assertNull(getField("sessionDisplay"))
+    @Test fun movingBetweenDisplaysKeepsTheSessionWhenTheWindowShrinks() {
+        val display = startSession(displayId = 28)
+        applySize(1284, 990)
+        assertEquals(size(1284, 990), getField("activeDisplaySize"))
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(0, getField("restartGeneration"))
+        assertFalse(getField("handshakeResetInProgress") as Boolean)
     }
 
-    @Test fun connectingInAReducedHeightWindowRebuildsWhenTheCameraCloses() {
-        startSession(windowHeight = 942)
+    @Test fun returningFromALauncherDisplayKeepsTheSessionAtTheSameSize() {
+        val display = startSession(windowWidth = 1284, displayId = 28)
+        applySize(1284, 990)
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(0, getField("restartGeneration"))
+    }
+
+    @Test fun launcherToFullscreenAndBackKeepsItsOriginalCanvas() {
+        val display = startSession(windowWidth = 1284, displayId = 28)
         applySize(1920, 990)
-        assertEquals(1, getField("restartGeneration"))
-        assertNull(getField("sessionDisplay"))
+        assertEquals(size(1920, 990), getField("activeDisplaySize"))
+        applySize(1284, 990)
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(1284, display.width)
+        assertEquals(990, display.height)
+        assertEquals(0, getField("restartGeneration"))
+        assertFalse(getField("handshakeResetInProgress") as Boolean)
+    }
+
+    @Test fun connectingInANarrowWindowKeepsTheSessionWhenTheCameraCloses() {
+        val display = startSession(windowWidth = 700)
+        applySize(1920, 990)
+        assertEquals(size(1920, 990), getField("activeDisplaySize"))
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(0, getField("restartGeneration"))
+        assertFalse(getField("handshakeResetInProgress") as Boolean)
+    }
+
+    @Test fun connectingInAReducedHeightWindowKeepsTheSessionWhenTheCameraCloses() {
+        val display = startSession(windowHeight = 942)
+        applySize(1920, 990)
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(0, getField("restartGeneration"))
     }
 
     @Test fun aScaledDownCanvasKeepsTheSessionWhenTheOriginalWindowReturns() {
@@ -95,11 +124,11 @@ class CarPlayHostDisplaySizeTest {
         assertEquals(0, getField("restartGeneration"))
     }
 
-    @Test fun aScaledUpCanvasStillRebuildsWhenTheStartupWindowGrows() {
-        startSession(windowWidth = 700, canvasWidth = 1400, canvasHeight = 1980)
+    @Test fun aScaledUpCanvasKeepsTheSessionWhenTheStartupWindowGrows() {
+        val display = startSession(windowWidth = 700, canvasWidth = 1400, canvasHeight = 1980)
         applySize(1000, 990)
-        assertEquals(1, getField("restartGeneration"))
-        assertNull(getField("sessionDisplay"))
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(0, getField("restartGeneration"))
     }
 
     @Test fun actualScreenRotationStillRebuildsTheSession() {
@@ -180,6 +209,40 @@ class CarPlayHostDisplaySizeTest {
         assertEquals(false, getField("touchOutsideContent"))
     }
 
+    @Test fun launcherCanvasKeepsTheSameTouchCoordinatesAfterFullscreenGrowth() {
+        val display = startSession(windowWidth = 1284, displayId = 28)
+        fun mapped(width: Int, x: Float) = MotionEvent.obtain(0, 0, MotionEvent.ACTION_DOWN, x, 742.5f, 0).let {
+            try {
+                val content = activity.javaClass.getDeclaredMethod("contentRect", Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType).apply { isAccessible = true }.invoke(activity, width, 990) as CarPlayVideoLayout
+                CarPlayTouchMapper.contacts(it, content).single()
+            } finally { it.recycle() }
+        }
+        // Quarter-width, three-quarter-height in the original 1284x990 phone picture.
+        val narrowTouch = mapped(1284, 321f)
+        val view = TextureView(activity).apply { layout(0, 0, 1920, 990) }
+        setField("videoView", view)
+        applySize(1920, 990)
+        val fullTouch = mapped(1920, 639f) // 318px left bar + 321px in the same canvas.
+        assertEquals(0.25, narrowTouch.x, 0.000001)
+        assertEquals(0.75, narrowTouch.y, 0.000001)
+        assertEquals(narrowTouch, fullTouch)
+        assertSame(display, getField("sessionDisplay"))
+        assertEquals(0, getField("restartGeneration"))
+
+        val corners = floatArrayOf(0f, 0f, 1920f, 990f)
+        view.getTransform(Matrix()).mapPoints(corners)
+        assertArrayEquals(floatArrayOf(318f, 0f, 1602f, 990f), corners, 0.001f)
+
+        val before = ShadowLog.getLogsForTag("xcertplay-usb").count { it.msg.startsWith("touch action=") }
+        touch(view, MotionEvent.ACTION_DOWN, 32f, 742.5f)
+        touch(view, MotionEvent.ACTION_MOVE, 639f, 742.5f)
+        assertTrue(getField("touchOutsideContent") as Boolean)
+        assertEquals(before, ShadowLog.getLogsForTag("xcertplay-usb").count { it.msg.startsWith("touch action=") })
+        touch(view, MotionEvent.ACTION_UP, 639f, 742.5f)
+        assertFalse(getField("touchOutsideContent") as Boolean)
+    }
+
     @Test fun adoptingABackgroundSessionPreservesItsCanvasOnResize() {
         val display = CarPlaySessionDisplay(1536, 792, Surface.ROTATION_0, true, true, 1920, 990)
         val sink = AndroidMediaSink()
@@ -193,9 +256,11 @@ class CarPlayHostDisplaySizeTest {
             object : AirPlayMediaHandler {}, {})
         try {
             CarPlayBackgroundSession.store(controller, sink, 1920, 990, Any(), display) {}
+            setField("videoView", TextureView(activity).apply { layout(0,0,1284,990) })
             val adopted = activity.javaClass.getDeclaredMethod("adoptBackgroundSession")
                 .apply { isAccessible = true }.invoke(activity)
             assertEquals(true, adopted)
+            assertEquals(size(1284,990),getField("activeDisplaySize"))
             applySize(700, 990)
             assertSame(controller, getField("controller"))
             assertSame(sink, getField("sink"))
@@ -207,13 +272,59 @@ class CarPlayHostDisplaySizeTest {
             assertSame(display, getField("sessionDisplay"))
             assertEquals(0, getField("restartGeneration"))
             applySize(2000, 990)
-            assertEquals(1, getField("restartGeneration"))
-            assertNull(getField("sessionDisplay"))
+            assertSame(controller, getField("controller"))
+            assertSame(display, getField("sessionDisplay"))
+            assertFalse(controller.isClosed())
+            assertEquals(0, getField("restartGeneration"))
         } finally {
             controller.close()
             controller.awaitClosed(1000)
             sink.close()
         }
+    }
+
+    @Test fun adaptiveCropNeedsMatchingHeaderAndUnknownResizeKeepsFitWithoutRestart() {
+        startSession(canvasWidth = 1920, canvasHeight = 990)
+        val selection = MainAreaSelection(1920, 990, listOf(MainViewArea(1920, 990), MainViewArea(960, 990)), 1)
+        val renderer = AndroidMediaSink(videoWidth = 1920, videoHeight = 990, adaptiveSelection = selection)
+        try {
+            setField("sink", renderer)
+            val view = TextureView(activity).apply { layout(0, 0, 960, 990) }
+            setField("videoView", view)
+            val update = activity.javaClass.getDeclaredMethod("updateVideoLayout", Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType).apply { isAccessible = true }
+            fun points(): FloatArray = floatArrayOf(0f, 0f, 480f, 990f).also { view.getTransform(Matrix()).mapPoints(it) }
+            update.invoke(activity, 960, 990)
+            assertArrayEquals(floatArrayOf(0f, 247.5f, 480f, 742.5f), points(), 0.001f)
+            assertTrue(selection.receive(VideoCodec.H264, MainAreaViewport(1920,990,0,0,960,990)))
+            update.invoke(activity, 960, 990)
+            assertArrayEquals(floatArrayOf(0f, 0f, 960f, 990f), points(), 0.001f)
+            setField("hideTopBar", false)
+            applySize(1234, 990)
+            assertNotNull(selection.confirmed)
+            assertEquals(0, getField("restartGeneration"))
+            assertFalse(getField("handshakeResetInProgress") as Boolean)
+        } finally { renderer.close() }
+    }
+
+    @Test fun twoPixelResizeJitterKeepsTheConfirmedAreaAndDoesNotStartCover() {
+        startSession(canvasWidth = 1920, canvasHeight = 990)
+        val selection = MainAreaSelection(1920,990,listOf(MainViewArea(1920,990),MainViewArea(960,990)),1)
+        val geometry = MainAreaViewport(1920,990,0,0,960,990)
+        assertTrue(selection.receive(VideoCodec.H264,geometry))
+        val renderer = AndroidMediaSink(adaptiveSelection = selection)
+        try {
+            setField("sink",renderer)
+            val request = activity.javaClass.getDeclaredMethod("requestAdaptiveArea",sizeClass).apply { isAccessible = true }
+            request.invoke(activity,size(960,988))
+            assertEquals(geometry,selection.confirmed)
+            request.invoke(activity,size(960,990))
+            assertEquals(geometry,selection.confirmed)
+            assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
+            request.invoke(activity,size(960,987))
+            assertEquals(geometry,selection.confirmed)
+            assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
+        } finally { renderer.close() }
     }
 
     private fun startSession(
@@ -222,8 +333,9 @@ class CarPlayHostDisplaySizeTest {
         windowHeight: Int = 990,
         canvasWidth: Int = windowWidth,
         canvasHeight: Int = windowHeight,
+        displayId: Int = 0,
     ): CarPlaySessionDisplay =
-        CarPlaySessionDisplay(canvasWidth, canvasHeight, rotation, true, true, windowWidth, windowHeight).also {
+        CarPlaySessionDisplay(canvasWidth, canvasHeight, rotation, true, true, windowWidth, windowHeight, displayId).also {
             setField("activeDisplaySize", size(windowWidth, windowHeight))
             setField("sessionDisplay", it)
         }

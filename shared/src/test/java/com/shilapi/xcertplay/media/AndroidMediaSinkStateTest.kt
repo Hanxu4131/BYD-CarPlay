@@ -4,6 +4,19 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class AndroidMediaSinkStateTest {
+    @Test fun onlyTheMainScreenInheritsTheConstructorSurface() {
+        val surface = Any()
+        assertSame(surface, VideoSurfaceRouting.defaultFor(110, surface))
+        assertNull(VideoSurfaceRouting.defaultFor(111, surface))
+    }
+
+    @Test fun duplicateExplicitScreenSurfaceIsDetectedForRejection() {
+        val surface = Any()
+        assertEquals(listOf(110), VideoSurfaceRouting.otherTypesUsing(111, surface, mapOf(110 to surface)))
+        assertTrue(VideoSurfaceRouting.otherTypesUsing(111, surface, mapOf(111 to surface)).isEmpty())
+        assertTrue(VideoSurfaceRouting.otherTypesUsing(111, Any(), mapOf(110 to surface)).isEmpty())
+    }
+
     @Test fun recreatingTheScreenRestoresItsActiveVideoState() {
         val sink = AndroidMediaSink()
         sink.onScreenStreamActive(110, true)

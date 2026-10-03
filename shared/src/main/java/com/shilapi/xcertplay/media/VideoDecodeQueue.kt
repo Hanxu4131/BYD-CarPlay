@@ -6,7 +6,12 @@ import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
 internal sealed interface VideoJob {
-    data class Config(val codec: VideoCodec, val codecData: ByteArray) : VideoJob
+    data class Config(val codec: VideoCodec, val codecData: ByteArray, val codedWidth: Int? = null, val codedHeight: Int? = null) : VideoJob {
+        fun sameDecoderConfig(other: Config, fallbackWidth: Int, fallbackHeight: Int): Boolean =
+            codec == other.codec && codecData.contentEquals(other.codecData) &&
+                (codedWidth ?: fallbackWidth) == (other.codedWidth ?: fallbackWidth) &&
+                (codedHeight ?: fallbackHeight) == (other.codedHeight ?: fallbackHeight)
+    }
     data class Frame(val nalus: ByteArray, val receivedNs: Long = System.nanoTime()) : VideoJob
     data class SurfaceChanged(val surface: Surface?) : VideoJob
     data object Resync : VideoJob

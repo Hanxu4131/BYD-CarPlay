@@ -23,6 +23,7 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
     interface Listener {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
+        fun onGeometry(codec: VideoCodec, geometry: MainAreaViewport?) {}
         fun onFrame(naluBytes: ByteArray) {}
         fun onClosed(cause: Throwable?) {}
     }
@@ -109,6 +110,7 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
                 val (codec, codecData) = ScreenCodec.detectConfig(body)
                 Log.i(TAG, "video codec config codec=$codec body=${body.size} data=${codecData.size}")
                 listener.onCodec(codec)
+                listener.onGeometry(codec, MainAreaViewport.parse(header))
                 listener.onConfig(codecData)
             }
         }

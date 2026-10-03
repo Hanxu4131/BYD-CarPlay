@@ -1,20 +1,32 @@
 package com.shilapi.xcertplay.media
 
-/** Diagnostic link between the touch uplink and the next video frame, read by [VideoStats]. */
+/** Diagnostic link to the next received and rendered main-screen frame, not visible app readiness. */
 internal object TouchLatencyProbe {
-    @Volatile private var pendingTouchNs = 0L
+    private var pendingTouchNs = 0L
+    private var pendingRenderTouchNs = 0L
     @Volatile var maxSendNs = 0L
 
-    fun onTouchSent(sentAtNs: Long, sendDurationNs: Long) {
+    @Synchronized fun onTouchSent(sentAtNs: Long, sendDurationNs: Long) {
         if (pendingTouchNs == 0L) pendingTouchNs = sentAtNs
+        if (pendingRenderTouchNs == 0L) pendingRenderTouchNs = sentAtNs
         if (sendDurationNs > maxSendNs) maxSendNs = sendDurationNs
     }
 
-    /** Returns touch-to-frame latency for the first frame after a touch, or -1. */
-    fun onFrame(nowNs: Long): Long {
+    /** Returns latency to the next received frame, which may still contain the old screen. */
+    @Synchronized fun onFrame(nowNs: Long): Long {
         val touch = pendingTouchNs
-        if (touch == 0L) return -1
+        if (touch == 0L || nowNs < touch) return -1
         pendingTouchNs = 0L
         return nowNs - touch
     }
+
+    /** Independent sample so reception cannot consume the render measurement. */
+    @Synchronized fun onRendered(nowNs: Long): Long {
+        val touch = pendingRenderTouchNs
+        if (touch == 0L || nowNs < touch) return -1
+        pendingRenderTouchNs = 0L
+        return nowNs - touch
+    }
+
+    @Synchronized fun takeMaxSendNs(): Long = maxSendNs.also { maxSendNs = 0L }
 }

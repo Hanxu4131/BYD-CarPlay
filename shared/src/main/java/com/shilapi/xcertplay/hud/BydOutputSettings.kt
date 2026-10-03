@@ -16,7 +16,8 @@ object BydOutputSettings {
     private const val KEY_CHARGING_CONNECTORS = "charging_connectors"
     private const val KEY_WHEEL_SPEED_TO_IPHONE = "wheel_speed_to_iphone"
     private const val KEY_VIDEO_WHILE_PARKED = "video_while_parked"
-    private const val KEY_CLUSTER_SONG = "cluster_song"
+    private const val KEY_CLUSTER_SONG_LEGACY = "cluster_song_legacy_instrument"
+    private const val KEY_CLUSTER_SONG_ARTIST = "cluster_song_show_artist"
     const val DEFAULT_LOW_CHARGE_PERCENT = 20
     val lowChargePresets = listOf(10, 15, 20, 25, 30)
 
@@ -56,11 +57,25 @@ object BydOutputSettings {
     fun setVideoWhileParked(context: Context, enabled: Boolean) =
         prefs(context).edit().putBoolean(KEY_VIDEO_WHILE_PARKED, enabled).apply()
 
-    /** Show the CarPlay song in the dashboard's music card (needs ADB over network); applies at once. */
-    fun clusterSong(context: Context): Boolean = prefs(context).getBoolean(KEY_CLUSTER_SONG, false)
+    /** Older BYD head units expose the instrument SDK without the newer navigation packages. */
+    fun clusterSongAvailable(context: Context): Boolean = available(context) || runCatching {
+        val device = Class.forName("android.hardware.bydauto.instrument.BYDAutoInstrumentDevice", false, context.classLoader)
+        device.getMethod("setMediaState", Int::class.java, Int::class.java, Int::class.java)
+        device.getMethod("setMediaInfo", Int::class.java, Int::class.java, ByteArray::class.java)
+        true
+    }.getOrDefault(false)
 
-    fun setClusterSong(context: Context, enabled: Boolean) =
-        prefs(context).edit().putBoolean(KEY_CLUSTER_SONG, enabled).apply()
+    /** Optional OEM interface, independent of the fast media session used by launchers. */
+    fun clusterSongLegacy(context: Context): Boolean = prefs(context).getBoolean(KEY_CLUSTER_SONG_LEGACY, false)
+
+    fun setClusterSongLegacy(context: Context, enabled: Boolean) =
+        prefs(context).edit().putBoolean(KEY_CLUSTER_SONG_LEGACY, enabled).apply()
+
+    /** Only changes the OEM card; Android media metadata always keeps the phone artist. */
+    fun clusterSongArtist(context: Context): Boolean = prefs(context).getBoolean(KEY_CLUSTER_SONG_ARTIST, true)
+
+    fun setClusterSongArtist(context: Context, enabled: Boolean) =
+        prefs(context).edit().putBoolean(KEY_CLUSTER_SONG_ARTIST, enabled).apply()
 
     /** At or below this charge the iPhone gets the low-range warning. */
     fun lowChargePercent(context: Context): Int = prefs(context).getInt(KEY_LOW_CHARGE_PERCENT, DEFAULT_LOW_CHARGE_PERCENT)

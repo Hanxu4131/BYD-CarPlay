@@ -15,6 +15,8 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaCodecList
 import android.media.MediaFormat
+import android.media.AudioManager
+import com.shilapi.xcertplay.media.NavigationPlayback
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -243,6 +245,14 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
     private var videoView: TextureView? = null
+    private var startupCover: ClusterStartupView? = null
+    private var resizeCover: AdaptiveResizeCover? = null
+    private val resizeTransition = AdaptiveResizeTransition()
+    private var lastAdaptiveAreaIndex: Int? = null
+    private var adaptiveRequestEpoch: Long? = null
+    private var texturePresentationSerial = 0L
+    private var resizeFitUntilFrame = false
+    private var hasRenderedHostFrame = false
     private var gestureOverlay: View? = null
     private var settingsMenu: View? = null
     private var mfiTargetGroup: RadioGroup? = null
@@ -281,7 +291,11 @@ class CarPlayHostActivity : ComponentActivity() {
     // Keep one surface per layer alive, including while its map card is hidden.
     private val clusterLayers = mutableMapOf<Boolean, ClusterMapPresentation>()
     // Copies of stream 111 outside the dashboard (centre card, launcher maps) each get their own decoder.
-    private val mirrorSink: (String, Surface?) -> Unit = { key, surface -> sink?.setMirrorSurface(SCREEN_TYPE_ALT, key, surface) }
+    private val mirrorSink: (String, Surface?) -> Unit = { key, surface ->
+        sink?.setMirrorSurface(SCREEN_TYPE_ALT, key, surface,
+            surface?.let { MapMirrors.frameRenderedCallback(key, it) },
+            surface?.let { MapMirrors.framePresentedCallback(key, it) })
+    }
     private val mirrorsChanged: () -> Unit = {
         updateClusterMapShown()
         if (MapMirrors.launcherShowsMap) CenterMapOverlay.hide()
@@ -342,6 +356,20 @@ class CarPlayHostActivity : ComponentActivity() {
     private var menuOpen = false
     private var latestStage = "Preparing CarPlay"
     private var darkMode = false
+    private val appearanceReader by lazy { HeadUnitAppearanceReader(applicationContext) }
+    private var lastAppearanceSample: HeadUnitAppearanceSample? = null
+    private var appliedAppearance: HeadUnitAppearance? = null
+    private var requestedAppearance: HeadUnitAppearance? = null
+    @Volatile private var lastAppearanceSendReport: String? = null
+    @Volatile private var appearanceGeneration = 0
+    // This follows the connection, so opening car settings does not pause appearance updates.
+    private val pollAppearance = object : Runnable {
+        override fun run() {
+            if (activeAirPlaySession == null || shuttingDown.get()) return
+            syncAirPlayDarkMode()
+            mainHandler.postDelayed(this, CONFIGURATION_POLL_INTERVAL_MILLIS)
+        }
+    }
     private var lastConfiguration: Configuration? = null
     private var activeAirPlaySession: AirPlaySession? = null
     private val activeScreenStreamTypes = mutableSetOf<Int>()
@@ -356,6 +384,15 @@ class CarPlayHostActivity : ComponentActivity() {
     private var gestureStartY = 0f
     private val shuttingDown = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var navigationVolumeResumed = false
+    private var navigationVolumeStreamSelected = false
+    private var navigationVolumeSelectionFailed = false
+    private val pollNavigationVolume = object : Runnable {
+        override fun run() {
+            updateNavigationVolumeStream()
+            if (navigationVolumeResumed) mainHandler.postDelayed(this, 150L)
+        }
+    }
     private val teardownExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val airPlayCommandExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val logLines = ArrayDeque<LogEntry>()
@@ -365,6 +402,8 @@ class CarPlayHostActivity : ComponentActivity() {
     private val pollConfiguration = object : Runnable {
         override fun run() {
             refreshConfiguration()
+            // Some launchers move a window without resizing its surface or sending configuration.
+            refreshDisplaySizeAfterLayout()
             mainHandler.postDelayed(this, CONFIGURATION_POLL_INTERVAL_MILLIS)
         }
     }
@@ -397,6 +436,8 @@ class CarPlayHostActivity : ComponentActivity() {
         }
 
         override fun onSurfaceTextureSizeChanged(texture: SurfaceTexture, width: Int, height: Int) {
+            prepareAdaptiveResize(DisplaySize(width, height))
+            applyFullscreenMode()
             updateVideoLayout(width, height)
             scheduleDisplaySize(width, height)
         }
@@ -414,7 +455,25 @@ class CarPlayHostActivity : ComponentActivity() {
             return true
         }
 
-        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) = Unit
+        override fun onSurfaceTextureUpdated(texture: SurfaceTexture) {
+            if (currentSurfaceTexture !== texture || isDestroyed) return
+            hasRenderedHostFrame = true
+            startupCover?.revealMap()
+            texturePresentationSerial++
+            if (resizeFitUntilFrame && sink?.adaptiveSelection?.confirmed != null) {
+                resizeFitUntilFrame = false
+                videoView?.let { updateVideoLayout(it.width, it.height) }
+            }
+            val selection = sink?.adaptiveSelection
+            val target = resizeTransition.targetIndex
+            val epoch = adaptiveRequestEpoch
+            if (target != null && epoch != null && selection?.current(target, epoch) == true &&
+                selection.confirmed?.matches(selection.areas[target]) == true &&
+                resizeTransition.presented(texturePresentationSerial, texture)) {
+                resizeCover?.reveal("resize_presented")
+                appendLog("Adaptive H264: resize cover revealed after geometry and texture presentation")
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -612,6 +671,10 @@ class CarPlayHostActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        applyFullscreenMode()
+        navigationVolumeResumed = true
+        mainHandler.removeCallbacks(pollNavigationVolume)
+        mainHandler.post(pollNavigationVolume)
         val languagePreference = AppLocale.preference(this)
         if (Build.VERSION.SDK_INT < 33 && languagePreference != languagePreferenceAtCreate) {
             languagePreferenceAtCreate = languagePreference
@@ -635,6 +698,7 @@ class CarPlayHostActivity : ComponentActivity() {
         ensureClusterPresentation()
         maybeStartCarPlay()
         applyFullscreenMode()
+        refreshDisplaySizeAfterLayout()
     }
 
     // Experimental: the CarPlay instrument-cluster stream on the BYD cluster projection display.
@@ -645,11 +709,17 @@ class CarPlayHostActivity : ComponentActivity() {
     private fun onClusterActivityState(state: ClusterActivityState.Snapshot) {
         if (state != detectedCluster) appendLog("Cluster map: detected theme=${state.theme} mapVisible=${state.mapVisible}")
         detectedCluster = state
-        if (!AirPlayPersistence.loadClusterMapEnabled(this)) { dismissClusterPresentation(); return }
+        if (!AirPlayPersistence.loadClusterMapEnabled(this) && !LegacyClusterMap.enabled(this)) { dismissClusterPresentation(); return }
         ensureClusterPresentation()
     }
 
     private fun ensureClusterPresentation() {
+        if (LegacyClusterMap.enabled(this)) {
+            dismissClusterPresentation()
+            LegacyClusterMap.startSession(this)
+            return
+        }
+        LegacyClusterMap.stopSession()
         if (!AirPlayPersistence.loadClusterMapEnabled(this)) {
             dismissClusterPresentation()
             return
@@ -745,6 +815,16 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun clusterDisplayConfig(): AirPlayDisplayConfig? {
+        if (LegacyClusterMap.enabled(this)) {
+            appendLog("Cluster map: experimental old-platform stream 1920x720; target=${LegacyClusterMap.target(this)}; visibility unverified")
+            // Combined mode draws a movable local card over a plain map. A card baked into the
+            // phone's video cannot move independently of its navigation marker and safe area.
+            val selected = LegacyClusterMap.content(this)
+            val phoneContent = if (selected == CarPlayClusterDisplay.Content.INSTRUMENTS)
+                CarPlayClusterDisplay.Content.MAP else selected
+            val config = CarPlayClusterDisplay.config(1920, 720, 100, content = phoneContent)
+            return config.copy(safeArea = LegacyClusterMap.keyInsets(this, config.widthPixels, config.heightPixels))
+        }
         if (!AirPlayPersistence.loadClusterMapEnabled(this)) return null
         val theme = effectiveClusterTheme()
         val display = ClusterMapPresentation.findDisplay(this, theme) ?: return null
@@ -770,17 +850,18 @@ class CarPlayHostActivity : ComponentActivity() {
 
     // The steering-wheel voice key reaches the focused window; while CarPlay is on screen it opens Siri.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (!CarPlayMediaButton.opensSiri(event.keyCode)) return super.dispatchKeyEvent(event)
-        if (event.action == KeyEvent.ACTION_UP) {
-            val sent = controller?.requestSiri() == true
-            appendLog("Siri: voice key ${event.keyCode} sent=$sent")
+        if (AirPlayPersistence.loadNavigationVolumeWheelEnabled(this) &&
+            event.keyCode in listOf(KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_MUTE)) {
+            Log.i(TAG, "Navigation volume key code=${event.keyCode} action=${event.action} stream=${if (navigationVolumeStreamSelected) 14 else "default"}")
         }
-        return true
+        if (SteeringWheelMappings.consume(this, event, defaults = true)) return true
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) {
+            if (!menuOpen) DiPlayEntryRouting.route.projectionOpened()
             refreshConfiguration()
             applyFullscreenMode()
         }
@@ -851,7 +932,22 @@ class CarPlayHostActivity : ComponentActivity() {
         }
     }
 
+    override fun onMultiWindowModeChanged(isInMultiWindowMode: Boolean, newConfig: Configuration) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode, newConfig)
+        applyFullscreenMode()
+        refreshDisplaySizeAfterLayout()
+    }
+
     override fun onDestroy() {
+        sink?.clearViewportChangedListener(adaptiveViewportListener)
+        adaptiveViewportListener = null
+        resizeTransition.cancel()
+        resizeCover?.dispose()
+        resizeCover = null
+        startupCover?.dispose()
+        startupCover = null
+        stopNavigationVolumePolling()
+        LegacyClusterMap.stopSession()
         clusterMonitor?.stop()
         mainHandler.removeCallbacks(hideIdleCenterMap)
         homeMonitor?.stop()
@@ -866,6 +962,8 @@ class CarPlayHostActivity : ComponentActivity() {
         mainHandler.removeCallbacks(applyDisplaySize)
         mainHandler.removeCallbacks(expireOldLogLines)
         mainHandler.removeCallbacks(pollConfiguration)
+        mainHandler.removeCallbacks(pollAppearance)
+        appearanceGeneration++
         currentSurface?.let { surface ->
             sink?.clearSurface(SCREEN_TYPE_MAIN, surface)
             sink?.clearSurface(SCREEN_TYPE_ALT, surface)
@@ -879,6 +977,43 @@ class CarPlayHostActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onPause() {
+        stopNavigationVolumePolling()
+        super.onPause()
+    }
+
+    private fun stopNavigationVolumePolling() {
+        navigationVolumeResumed = false
+        mainHandler.removeCallbacks(pollNavigationVolume)
+        selectNavigationVolumeStream(false)
+    }
+
+    private fun updateNavigationVolumeStream() {
+        val enabled = AirPlayPersistence.loadNavigationVolumeWheelEnabled(this)
+        if (!enabled && !navigationVolumeStreamSelected) navigationVolumeSelectionFailed = false
+        val playback = NavigationPlayback.snapshot()
+        val shouldSelect = NavigationVolumeKeyPolicy.shouldSelectNavigation(
+            enabled, navigationVolumeResumed, CarPlayBackgroundSession.isOwner(this),
+            controller?.hasActiveAirPlayAttachment() == true,
+            playback.active, playback.legacyStreamType,
+        )
+        selectNavigationVolumeStream(shouldSelect)
+    }
+
+    private fun selectNavigationVolumeStream(navigation: Boolean) {
+        if (navigation == navigationVolumeStreamSelected || (navigation && navigationVolumeSelectionFailed)) return
+        try {
+            setVolumeControlStream(if (navigation) 14 else AudioManager.USE_DEFAULT_STREAM_TYPE)
+            navigationVolumeStreamSelected = navigation
+            appendLog("Navigation volume keys: ${if (navigation) "stream=14" else "default"}")
+        } catch (error: Exception) {
+            if (!navigationVolumeSelectionFailed) {
+                Log.w(TAG, "Navigation volume selection rejected action=${if (navigation) "navigation" else "restore"} error=${error.javaClass.simpleName}")
+            }
+            navigationVolumeSelectionFailed = true
+        }
+    }
+
     private fun buildContentView(): View {
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         val video = TextureView(this).apply {
@@ -890,6 +1025,12 @@ class CarPlayHostActivity : ComponentActivity() {
             setOnTouchListener { view, event -> onHostTouch(view, event) }
         }
         root.addView(video, FrameLayout.LayoutParams(-1, -1))
+        val cover = ClusterStartupView(this, minimumShowMs = 0L)
+        cover.setUltra(StartupLogoPreferences.ultra(this@CarPlayHostActivity))
+        startupCover = cover
+        root.addView(cover, FrameLayout.LayoutParams(-1, -1))
+        cover.waitForFrame()
+        resizeCover = AdaptiveResizeCover(this).also { root.addView(it, FrameLayout.LayoutParams(-1, -1)) }
         root.addView(gestureLayer, FrameLayout.LayoutParams(-1, -1))
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1399,21 +1540,6 @@ class CarPlayHostActivity : ComponentActivity() {
         )
         content.addView(
             buildFullscreenSection(),
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(12) },
-        )
-
-        content.addView(
-            settingsCategoryHeader(getString(R.string.diagnostics)),
-            LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
-            ).apply { topMargin = dp(40) },
-        )
-        content.addView(
-            buildDebugLogsSection(),
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -2827,10 +2953,13 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun createAirPlayConfig(size: DisplaySize): AirPlayConfig {
-        val physical = resolvePhysicalSize(size)
+        val adaptive = AdaptiveDisplayPreferences.enabled(this) && !hevcEnabled
+        val canvasSize = if (adaptive) DisplaySize(maxOf(size.width, maximumDetectedWidthPixels), maxOf(size.height, maximumDetectedHeightPixels)) else size
+        val physical = resolvePhysicalSize(canvasSize)
         val baseDisplay = AirPlayDisplayConfig(
-            widthPixels = size.width,
-            heightPixels = size.height,
+            separateCornerMasks = !hevcEnabled && AdaptiveDisplayPreferences.squareCorners(this),
+            widthPixels = canvasSize.width,
+            heightPixels = canvasSize.height,
             widthPhysicalMm = physical.widthMm,
             heightPhysicalMm = physical.heightMm,
             fps = fps,
@@ -2856,7 +2985,7 @@ class CarPlayHostActivity : ComponentActivity() {
             }
         }
         appendLog("CarPlay size=${CarPlayUiScale.label(uiScalePercent)} canvas=${scaledDisplay.widthPixels}x${scaledDisplay.heightPixels}")
-        val display = scaledDisplay.copy(
+        var display = scaledDisplay.copy(
             safeArea = AirPlaySafeArea.toInsets(
                 mapping = AirPlayPersistence.loadSafeAreaRect(this, size.width, size.height),
                 activityWidthPixels = size.width,
@@ -2866,6 +2995,15 @@ class CarPlayHostActivity : ComponentActivity() {
             ),
             safeAreaDrawOutside = safeAreaDrawOutside,
         )
+        if (adaptive) {
+            val current = com.shilapi.xcertplay.airplay.MainViewArea(
+                (size.width.toLong() * display.widthPixels / canvasSize.width).toInt(),
+                (size.height.toLong() * display.heightPixels / canvasSize.height).toInt())
+            val full = com.shilapi.xcertplay.airplay.MainViewArea(display.widthPixels, display.heightPixels)
+            val areas = listOf(full, current).distinct()
+            display = display.copy(adaptiveViewAreas = areas, initialViewArea = areas.indexOf(current))
+            appendLog("Adaptive H264: declared areas=$areas initial=${display.initialViewArea} canvas=${display.widthPixels}x${display.heightPixels}")
+        }
         val requestSummary = "Display request selected=${CarPlayUiScale.label(requestedPercent)} percent=$requestedPercent " +
             "surface=${size.width}x${size.height} resolution=${displayScaleTenths * 10}% " +
             "base=${resolutionDisplay.widthPixels}x${resolutionDisplay.heightPixels} " +
@@ -3049,6 +3187,7 @@ class CarPlayHostActivity : ComponentActivity() {
         videoWidth: Int,
         videoHeight: Int,
         controllerGeneration: Int,
+        adaptiveSelection: com.shilapi.xcertplay.airplay.MainAreaSelection? = null,
     ): AndroidMediaSink {
         // Capture this session's log: late decoder shutdown must not write into a new session.
         val diagnosticLog = sessionLog
@@ -3071,6 +3210,7 @@ class CarPlayHostActivity : ComponentActivity() {
                 diagnosticLog?.append(formattedLogLine(message, System.currentTimeMillis()))
             },
             onMediaAudioChanged = CarPlayMediaKeys::onMediaAudioChanged,
+            adaptiveSelection = adaptiveSelection,
         )
     }
 
@@ -3088,10 +3228,16 @@ class CarPlayHostActivity : ComponentActivity() {
                     if (controllerGeneration != restartGeneration) {
                         return@runOnUiThread
                     }
+                    if (activeAirPlaySession === session) return@runOnUiThread
                     activeAirPlaySession = session
+                    (actualHostSize() ?: activeDisplaySize)?.let(::requestAdaptiveArea)
+                    appliedAppearance = null
+                    lastAppearanceSendReport = null
                     CarPlayBackgroundSession.active = true
                     reconnectAttempts = 0
-                    syncAirPlayDarkMode()
+                    syncAirPlayDarkMode(force = true)
+                    mainHandler.removeCallbacks(pollAppearance)
+                    mainHandler.postDelayed(pollAppearance, CONFIGURATION_POLL_INTERVAL_MILLIS)
                     if (menuOpen) return@runOnUiThread
                     appendLog("AirPlay session active")
                 }
@@ -3099,12 +3245,23 @@ class CarPlayHostActivity : ComponentActivity() {
 
             override fun onSessionEnded(session: AirPlaySession) {
                 runOnUiThread {
-                    if (activeAirPlaySession === session) activeAirPlaySession = null
+                    if (activeAirPlaySession === session) {
+                        activeAirPlaySession = null
+                        cancelAdaptiveResize()
+                        sink?.adaptiveSelection?.reset()
+                        videoView?.let { updateVideoLayout(it.width, it.height) }
+                        appearanceGeneration++
+                        mainHandler.removeCallbacks(pollAppearance)
+                    }
                     CarPlayBackgroundSession.active = false
                     if (menuOpen || controllerGeneration != restartGeneration) {
                         return@runOnUiThread
                     }
+                    hasRenderedHostFrame = false
+                    startupCover?.setUltra(StartupLogoPreferences.ultra(this@CarPlayHostActivity))
+                    startupCover?.waitForFrame()
                     activeScreenStreamTypes.clear()
+                    MapMirrors.setStreamActive(false)
                     setConnectionStage(getString(R.string.carplay_session_ended_reconnecting))
                     appendLog("AirPlay session ended; reconnecting from scratch")
                     reconnectAfterLoss("AirPlay session ended")
@@ -3117,6 +3274,7 @@ class CarPlayHostActivity : ComponentActivity() {
                         return@runOnUiThread
                     }
                     activeScreenStreamTypes.clear()
+                    MapMirrors.setStreamActive(false)
                     setConnectionStage(getString(R.string.transport_error_reconnecting))
                     appendLog("CarPlay transport error: $message; reconnecting from scratch")
                     reconnectAfterLoss("CarPlay transport error: $message")
@@ -3168,17 +3326,19 @@ class CarPlayHostActivity : ComponentActivity() {
         displayDiagnosticAttempt = DisplayDiagnosticSnapshot.currentAttempt(this)
         controller = snapshot.controller
         sink = snapshot.sink
+        bindAdaptiveViewport(snapshot.sink)
         sessionDisplay = snapshot.display
         MapMirrors.reapply()
         CarPlayBackgroundSession.store(snapshot.controller, snapshot.sink, snapshot.width, snapshot.height,
-            this, snapshot.display) { completion ->
+            this, snapshot.display,
+            restartAvailable = ::canRestartFromControls, restart = ::restartFromControls) { completion ->
             runOnUiThread {
                 shutdown(false, "DiPlay disconnect", completion)
                 finish()
             }
         }
         if (snapshot.width > 0 && snapshot.height > 0) {
-            activeDisplaySize = DisplaySize(snapshot.width, snapshot.height)
+            activeDisplaySize = actualHostSize() ?: DisplaySize(snapshot.width, snapshot.height)
         }
         videoView?.let { updateVideoLayout(it.width, it.height) }
         val generation = restartGeneration
@@ -3252,8 +3412,12 @@ class CarPlayHostActivity : ComponentActivity() {
             videoWidth = airPlayConfig.main.widthPixels,
             videoHeight = airPlayConfig.main.heightPixels,
             controllerGeneration = controllerGeneration,
+            adaptiveSelection = airPlayConfig.main.adaptiveViewAreas.takeIf { it.isNotEmpty() }?.let {
+                com.shilapi.xcertplay.airplay.MainAreaSelection(airPlayConfig.main.widthPixels, airPlayConfig.main.heightPixels, it, airPlayConfig.main.initialViewArea, maxOf(size.width, maximumDetectedWidthPixels), maxOf(size.height, maximumDetectedHeightPixels))
+            },
         )
         sink = renderer
+        bindAdaptiveViewport(renderer)
         currentSurface?.let(::attachSurface)
         clusterSurface?.let { renderer.setSurface(SCREEN_TYPE_ALT, it) }
         MapMirrors.reapply()
@@ -3284,10 +3448,11 @@ class CarPlayHostActivity : ComponentActivity() {
         CarPlayMediaKeys.attach(this, next)
         if (airPlayConfig.videoInCar) CarPlayVideo.attach(this, next)
         val display = CarPlaySessionDisplay(airPlayConfig.main.widthPixels, airPlayConfig.main.heightPixels,
-            displayRotation(), hideTopBar, hideBottomBar, size.width, size.height)
+            displayRotation(), hideTopBar, hideBottomBar, size.width, size.height, currentHostDisplayId())
         sessionDisplay = display
         videoView?.let { updateVideoLayout(it.width, it.height) }
-        CarPlayBackgroundSession.store(next, renderer, size.width, size.height, this, display) { completion ->
+        CarPlayBackgroundSession.store(next, renderer, size.width, size.height, this, display,
+            restartAvailable = ::canRestartFromControls, restart = ::restartFromControls) { completion ->
             runOnUiThread {
                 shutdown(terminateProcess = false, reason = "DiPlay disconnect", completion = completion)
                 finish()
@@ -3304,28 +3469,49 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun refreshConfiguration(newConfig: Configuration = resources.configuration) {
-        if (lastConfiguration == newConfig) return
-        // resources.configuration is mutated in place, so keep a copy to compare against.
         lastConfiguration = Configuration(newConfig)
-        val night = nightModeOrNull(newConfig.uiMode) ?: return
-        if (night == darkMode) return
-        darkMode = night
-        appendLog("Head unit switched to ${if (night) "night" else "day"} mode")
-        syncAirPlayDarkMode()
+        syncAirPlayDarkMode(uiMode = newConfig.uiMode)
     }
 
-    private fun syncAirPlayDarkMode() {
+    private fun syncAirPlayDarkMode(force: Boolean = false, uiMode: Int = resources.configuration.uiMode) {
         val session = activeAirPlaySession ?: return
-        val night = darkMode
+        val sample = appearanceReader.sample(uiMode)
+        val appearance = sample.resolve()
+        if (sample != lastAppearanceSample) {
+            lastAppearanceSample = sample
+            val report = "Car appearance selected=${sample.selectedMode} systemUiMode=${sample.systemUiMode} " +
+                "activityUiMode=${sample.activityUiMode} selectionLocked=${sample.selectionLocked} modeType=${sample.currentModeType} " +
+                "source=${appearance?.source ?: "unknown"}"
+            appendLog(report)
+            Log.w(TAG, report)
+        }
+        // Undefined vendor state does not authorize a spurious light-mode update.
+        appearance ?: return
+        if (requestedAppearance?.night != appearance.night || requestedAppearance?.manual != appearance.manual) {
+            requestedAppearance = appearance
+            // An opposite update may already be writing; send the latest mode even when it matches an older success.
+            appliedAppearance = null
+        }
+        if (!force && appliedAppearance?.night == appearance.night && appliedAppearance?.manual == appearance.manual) return
+        darkMode = appearance.night
+        val generation = ++appearanceGeneration
         airPlayCommandExecutor.execute {
+            if (generation != appearanceGeneration) return@execute
             try {
-                val sent = session.setNightMode(night)
-                Log.i(
-                    TAG,
-                    "AirPlay dark mode=${if (night) "dark" else "light"} eventChannelReady=$sent",
-                )
+                val sent = session.setAppearance(appearance.night, appearance.manual)
+                if (sent) mainHandler.post {
+                    if (generation == appearanceGeneration && activeAirPlaySession === session) {
+                        appliedAppearance = appearance
+                    }
+                }
+                val report = "CarPlay appearance night=${appearance.night} manual=${appearance.manual} eventChannelReady=$sent"
+                if (lastAppearanceSendReport != report) {
+                    lastAppearanceSendReport = report
+                    appendLog(report)
+                    Log.w(TAG, report)
+                }
             } catch (error: Throwable) {
-                Log.w(TAG, "Could not send AirPlay dark mode update", error)
+                Log.w(TAG, "Could not send CarPlay appearance update", error)
             }
         }
     }
@@ -3350,11 +3536,14 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun applyDisplaySize(size: DisplaySize) {
         val display = sessionDisplay
-        val layoutChanged = displayLayoutChanged()
+        prepareAdaptiveResize(size)
+        applyFullscreenMode()
+        val layoutChanged = displayLayoutChanged() && sink?.adaptiveSelection == null
         if (shuttingDown.get() || (size == activeDisplaySize && !layoutChanged)) return
         val previous = activeDisplaySize
         activeDisplaySize = size
         recordDetectedMaximum(size)
+        applyFullscreenMode()
         updateResolutionMenu()
         if (previous == null) {
             appendLog("Display detected: ${size.width}x${size.height}")
@@ -3364,24 +3553,29 @@ class CarPlayHostActivity : ComponentActivity() {
                 "Display updated while handshake is reset: " +
                     "${previous.width}x${previous.height} -> ${size.width}x${size.height}",
             )
-        } else if (display != null && !layoutChanged &&
-            size.width <= display.windowWidth && size.height <= display.windowHeight) {
-            // Keep camera shrink/restore cycles within the original window connected. If the
-            // session started in a camera window, growth beyond it needs a full-size canvas.
+        } else if (display != null && !layoutChanged) {
+            // Resize or launcher-display moves keep the negotiated canvas and the connection.
+            // Fit the complete picture into the new window; a larger window may look softer.
             val message = "Display changed ${previous.width}x${previous.height} -> ${size.width}x${size.height}; " +
                 "keeping CarPlay session canvas=${display.width}x${display.height}"
             appendLog(message)
             Log.i(TAG, message)
+            requestAdaptiveArea(size)
             videoView?.let { updateVideoLayout(it.width, it.height) }
         } else {
             restartCarPlay(
-                "Display changed ${previous.width}x${previous.height} -> ${size.width}x${size.height}",
+                "Display changed ${previous.width}x${previous.height} -> ${size.width}x${size.height}; " +
+                    "hostDisplay=${currentHostDisplayId()} sessionDisplay=${display?.displayId}",
             )
         }
     }
 
     @Suppress("DEPRECATION")
     private fun displayRotation(): Int = videoView?.display?.rotation ?: windowManager.defaultDisplay.rotation
+
+    @Suppress("DEPRECATION")
+    private fun currentHostDisplayId(): Int =
+        videoView?.display?.displayId ?: window.decorView.display?.displayId ?: windowManager.defaultDisplay.displayId
 
     private fun displayLayoutChanged(): Boolean {
         val display = sessionDisplay ?: return false
@@ -3390,9 +3584,119 @@ class CarPlayHostActivity : ComponentActivity() {
             display.hideTopBar != hideTopBar || display.hideBottomBar != hideBottomBar
     }
 
+    private var adaptiveViewportListener: (() -> Unit)? = null
+    private val adaptiveRequestOwner = Any()
+    private fun actualHostSize(): DisplaySize? = videoView?.let {
+        if (it.width > 0 && it.height > 0) DisplaySize(it.width, it.height) else null
+    }
+
+    private fun bindAdaptiveViewport(renderer: AndroidMediaSink) {
+        lastAdaptiveAreaIndex = renderer.adaptiveSelection?.let { selection ->
+            selection.confirmed?.let { geometry -> selection.areas.indexOfFirst(geometry::matches).takeIf { it >= 0 } }
+        }
+        val listener: () -> Unit = {
+            runOnUiThread {
+                if (sink !== renderer || shuttingDown.get()) return@runOnUiThread
+                videoView?.let { updateVideoLayout(it.width, it.height) }
+                val selection = renderer.adaptiveSelection
+                val target = resizeTransition.targetIndex
+                val epoch = adaptiveRequestEpoch
+                if (target != null && epoch != null && selection?.current(target, epoch) == true &&
+                    selection.confirmed?.matches(selection.areas[target]) == true) {
+                    resizeTransition.confirm(target, epoch, texturePresentationSerial, currentSurfaceTexture)
+                }
+                if (renderer.adaptiveSelection?.h264 == true && renderer.adaptiveSelection?.confirmed == null && pendingDisplaySize == null) {
+                    (actualHostSize() ?: activeDisplaySize)?.let(::requestAdaptiveArea)
+                }
+            }
+        }
+        adaptiveViewportListener = listener
+        renderer.setViewportChangedListener(listener)
+    }
+
+    private fun cancelAdaptiveResize() {
+        resizeTransition.cancel()
+        resizeCover?.reveal("resize_cancelled")
+        lastAdaptiveAreaIndex = null
+        adaptiveRequestEpoch = null
+        resizeFitUntilFrame = false
+    }
+
+    private fun prepareAdaptiveResize(size: DisplaySize) {
+        val selection = sink?.adaptiveSelection ?: return
+        if (!selection.h264 || (!hasRenderedHostFrame && selection.confirmed == null) || activeAirPlaySession == null) return
+        val width = (size.width.toLong() * selection.canvasWidth / selection.sourceWidth).toInt()
+        val height = (size.height.toLong() * selection.canvasHeight / selection.sourceHeight).toInt()
+        val index = selection.areas.indexOfFirst { kotlin.math.abs(it.width - width) <= 2 && kotlin.math.abs(it.height - height) <= 2 }
+        val previous = lastAdaptiveAreaIndex ?: return
+        if (index < 0 || index == previous) {
+            if (resizeTransition.active && resizeTransition.targetIndex != index) {
+                resizeTransition.cancel(); resizeCover?.reveal("resize_cancelled")
+            }
+            return
+        }
+        val alreadyWaiting = resizeTransition.targetIndex == index
+        val token = resizeTransition.begin(index)
+        if (alreadyWaiting) return
+        resizeFitUntilFrame = false
+        resizeCover?.show()
+        mainHandler.postDelayed({
+            if (resizeTransition.expire(token)) {
+                resizeFitUntilFrame = true
+                videoView?.let { updateVideoLayout(it.width, it.height) }
+                resizeCover?.reveal("resize_timeout")
+                appendLog("Adaptive H264: resize cover timeout after 3s")
+            }
+        }, 3000)
+    }
+
+    private fun requestAdaptiveArea(size: DisplaySize) {
+        val renderer = sink ?: return
+        val selection = renderer.adaptiveSelection ?: return
+        val width = (size.width.toLong() * selection.canvasWidth / selection.sourceWidth).toInt()
+        val height = (size.height.toLong() * selection.canvasHeight / selection.sourceHeight).toInt()
+        prepareAdaptiveResize(size)
+        val area = selection.areas.firstOrNull { kotlin.math.abs(it.width - width) <= 2 && kotlin.math.abs(it.height - height) <= 2 }
+        if (area == null) {
+            appendLog("Adaptive H264: transient undeclared area ${width}x$height; preserving confirmed viewport")
+            return
+        }
+        val request = selection.select(area.width, area.height)
+        if (request != null) {
+            lastAdaptiveAreaIndex = request.first
+            adaptiveRequestEpoch = request.second
+            resizeTransition.arm(request.first, request.second)
+        }
+        if (request == null) { appendLog("Adaptive H264: undeclared area ${width}x$height; keeping fit"); return }
+        if (!selection.h264 || selection.confirmed != null) return
+        val session = activeAirPlaySession ?: return
+        val generation = restartGeneration
+        if (!selection.beginRequestSeries(request.first, request.second, adaptiveRequestOwner)) return
+        fun current(): Boolean = !isDestroyed && !isFinishing && generation == restartGeneration &&
+            activeAirPlaySession === session && sink === renderer &&
+            selection.ownsRequestSeries(request.first, request.second, adaptiveRequestOwner)
+        fun sendAttempt(attempt: Int) {
+            if (!current() || selection.confirmed != null) return
+            airPlayCommandExecutor.execute {
+                if (!current() || selection.confirmed != null || !selection.markRequested(request.first, request.second, 3)) return@execute
+                val written = session.requestMainViewArea(request.first)
+                appendLog("Adaptive H264: area=${request.first} attempt=$attempt/3 commandWritten=$written; awaiting matching geometry")
+            }
+        }
+        sendAttempt(1)
+        mainHandler.postDelayed({ sendAttempt(2) }, 1000)
+        mainHandler.postDelayed({ sendAttempt(3) }, 2000)
+        mainHandler.postDelayed({
+            if (current() && selection.confirmed == null) {
+                appendLog("Adaptive H264: area=${request.first} unconfirmed after 3s/at most 3 requests; keeping fit")
+            }
+        }, 3000)
+    }
+
     private fun contentRect(viewWidth: Int, viewHeight: Int): CarPlayVideoLayout {
         val display = sessionDisplay ?: return CarPlayVideoLayout(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
-        return CarPlayVideoLayout.fit(display.width, display.height, viewWidth, viewHeight)
+        val geometry = sink?.adaptiveSelection?.confirmed?.takeUnless { resizeFitUntilFrame }
+        return CarPlayVideoLayout.fit(geometry?.width ?: display.width, geometry?.height ?: display.height, viewWidth, viewHeight)
     }
 
     private fun updateVideoLayout(viewWidth: Int, viewHeight: Int) {
@@ -3400,8 +3704,16 @@ class CarPlayHostActivity : ComponentActivity() {
         if (viewWidth <= 0 || viewHeight <= 0) return
         val content = contentRect(viewWidth, viewHeight)
         view.setTransform(Matrix().apply {
-            setScale(content.width / viewWidth, content.height / viewHeight)
-            postTranslate(content.left, content.top)
+            val geometry = sink?.adaptiveSelection?.confirmed?.takeUnless { resizeFitUntilFrame }
+            if (geometry != null) {
+                setScale(content.width / viewWidth * geometry.codedWidth / geometry.width,
+                    content.height / viewHeight * geometry.codedHeight / geometry.height)
+                postTranslate(content.left - geometry.x * content.width / geometry.width,
+                    content.top - geometry.y * content.height / geometry.height)
+            } else {
+                setScale(content.width / viewWidth, content.height / viewHeight)
+                postTranslate(content.left, content.top)
+            }
         })
     }
 
@@ -3468,6 +3780,14 @@ class CarPlayHostActivity : ComponentActivity() {
         )
     }
 
+    private fun canRestartFromControls(): Boolean =
+        CarPlayBackgroundSession.isOwner(this) && !shuttingDown.get() && !menuOpen &&
+            !handshakeResetInProgress && activeDisplaySize != null
+
+    private fun restartFromControls() {
+        restartCarPlay(getString(R.string.restarting_carplay))
+    }
+
     /** Full-stack fallback when an AirPlay-only reconnect is unavailable. */
     private fun restartCarPlay(reason: String) {
         if (!CarPlayBackgroundSession.isOwner(this)) return
@@ -3475,9 +3795,14 @@ class CarPlayHostActivity : ComponentActivity() {
         val size = activeDisplaySize ?: return
         appendLog(reason)
         activeScreenStreamTypes.clear()
+        MapMirrors.setStreamActive(false)
         setConnectionStage(reason)
         Log.i(TAG, "$reason; rebuilding stack at ${size.width}x${size.height}")
         val generation = ++restartGeneration
+        cancelAdaptiveResize()
+        hasRenderedHostFrame = false
+        startupCover?.setUltra(StartupLogoPreferences.ultra(this@CarPlayHostActivity))
+        startupCover?.waitForFrame()
         handshakeResetInProgress = true
         val oldController = controller
         val oldSink = sink
@@ -3552,6 +3877,8 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun shutdown(terminateProcess: Boolean, reason: String, completion: () -> Unit = {}) {
         if (!shuttingDown.compareAndSet(false, true)) { completion(); return }
+        MapMirrors.setStreamActive(false)
+        LegacyClusterMap.closeWindow()
         restartGeneration += 1
         mainHandler.removeCallbacks(applyDisplaySize)
         val oldController = controller
@@ -3580,11 +3907,9 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun attachSurface(surface: Surface) {
         sink?.setSurface(SCREEN_TYPE_MAIN, surface)
-        if (AirPlayPersistence.loadClusterMapEnabled(this)) {
-            clusterSurface?.let { sink?.setSurface(SCREEN_TYPE_ALT, it) }
-        } else {
-            sink?.setSurface(SCREEN_TYPE_ALT, surface)
-        }
+        // Each screen decoder must own its surface. The secondary map waits for its
+        // presentation or mirror instead of connecting a second codec to the centre screen.
+        clusterSurface?.let { sink?.setSurface(SCREEN_TYPE_ALT, it) }
     }
 
     private fun onHostTouch(view: View, event: MotionEvent): Boolean {
@@ -3647,7 +3972,10 @@ class CarPlayHostActivity : ComponentActivity() {
             }
             return true
         }
-        val contacts = CarPlayTouchMapper.contacts(event, content)
+        val selection = sink?.adaptiveSelection
+        val contacts = CarPlayTouchMapper.contacts(event, content).map { contact ->
+            selection?.confirmed?.takeUnless { resizeFitUntilFrame }?.map(contact, selection.canvasWidth, selection.canvasHeight) ?: contact
+        }
         val queued = controller?.sendTouch(contacts) ?: false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN,
@@ -3678,6 +4006,10 @@ class CarPlayHostActivity : ComponentActivity() {
                 activeScreenStreamTypes.add(type)
             } else {
                 activeScreenStreamTypes.remove(type)
+            }
+            if (type == SCREEN_TYPE_MAIN && active && !hasRenderedHostFrame) {
+                startupCover?.setUltra(StartupLogoPreferences.ultra(this@CarPlayHostActivity))
+                startupCover?.waitForFrame()
             }
             if (type == SCREEN_TYPE_ALT) {
                 Log.i(ClusterMapPresentation.TAG, "cluster stream active=$active")
@@ -3779,8 +4111,14 @@ class CarPlayHostActivity : ComponentActivity() {
     }
 
     private fun applyFullscreenMode() {
-        val hideTop = hideTopBar
-        val hideBottom = hideBottomBar
+        val decor = window.decorView
+        val viewWidth = videoView?.width?.takeIf { it > 0 } ?: decor.width
+        val mode = Regex("(?:mWindowingMode|windowingMode)=([a-zA-Z]+)").find(resources.configuration.toString())?.groupValues?.get(1)
+        val fullWindow = HostFullscreenPolicy.overrideBars(currentHostDisplayId(), viewWidth,
+            maximumDetectedWidthPixels, decor.rootView.width, decor.rootView.height,
+            maximumDetectedHeightPixels, isInMultiWindowMode, mode)
+        val hideTop = hideTopBar || fullWindow
+        val hideBottom = hideBottomBar || fullWindow
         WindowCompat.setDecorFitsSystemWindows(window, !(hideTop && hideBottom))
         val controller = WindowInsetsControllerCompat(window, window.decorView)
         if (hideTop) {
@@ -3871,9 +4209,11 @@ internal data class CarPlaySessionDisplay(
     val rotation: Int,
     val hideTopBar: Boolean,
     val hideBottomBar: Boolean,
-    // Compare unscaled startup window dimensions, not the scaled video canvas.
+    // Keep the original window dimensions alongside the negotiated video canvas.
     val windowWidth: Int,
     val windowHeight: Int,
+    // Diagnostic identity only; moving between displays does not renegotiate the canvas.
+    val displayId: Int = 0,
 )
 
 /** Process-local hand-off for keeping the CarPlay session alive while no Activity is visible. */
@@ -3881,10 +4221,23 @@ internal object CarPlayBackgroundSession {
     @Volatile var active = false
     private var stopAction: (((() -> Unit)) -> Unit)? = null
     private var stopping = false
+    private var restartAvailable: (() -> Boolean)? = null
+    private var restartAction: (() -> Unit)? = null
     private var owner: Any? = null
     @Synchronized fun isOwner(candidate: Any): Boolean = owner === candidate
     @Synchronized fun hasSession(): Boolean = stopAction != null || stopping
     private val stopWaiters = mutableListOf<() -> Unit>()
+
+    @Synchronized
+    fun canRestart(): Boolean = !stopping && restartAction != null && restartAvailable?.invoke() == true
+
+    /** Called on the main thread by the control page; the owning host keeps its display/session settings. */
+    @Synchronized
+    fun restart(): Boolean {
+        if (!canRestart()) return false
+        restartAction?.invoke()
+        return true
+    }
 
     fun stop(completion: () -> Unit = {}) {
         val action: (((() -> Unit)) -> Unit)?
@@ -3927,8 +4280,12 @@ internal object CarPlayBackgroundSession {
 
     @Synchronized
     fun store(controller: CarPlayController, sink: AndroidMediaSink, width: Int, height: Int,
-        owner: Any, display: CarPlaySessionDisplay, stop: (() -> Unit) -> Unit) {
+        owner: Any, display: CarPlaySessionDisplay,
+        restartAvailable: (() -> Boolean)? = null, restart: (() -> Unit)? = null,
+        stop: (() -> Unit) -> Unit) {
         this.stopAction = stop
+        this.restartAvailable = restartAvailable
+        this.restartAction = restart
         this.owner = owner
         this.controller = controller
         this.sink = sink
@@ -3942,7 +4299,7 @@ internal object CarPlayBackgroundSession {
         if (expected != null && controller !== expected) return
         controller = null
         sink = null
-        if (!keepOwner) { stopAction = null; owner = null }
+        if (!keepOwner) { stopAction = null; restartAvailable = null; restartAction = null; owner = null }
         active = false
         width = 0
         height = 0

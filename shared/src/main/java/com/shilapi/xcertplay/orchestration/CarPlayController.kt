@@ -28,6 +28,7 @@ import com.shilapi.xcertplay.airplay.AirPlaySession
 import com.shilapi.xcertplay.airplay.AirPlaySessionListener
 import com.shilapi.xcertplay.airplay.PairingStore
 import com.shilapi.xcertplay.airplay.VideoInCar
+import com.shilapi.xcertplay.diagnostics.CarPlayNegotiationSummary
 import com.shilapi.xcertplay.hud.BydNavigationOutputs
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
@@ -171,6 +172,7 @@ class CarPlayController(
         },
     )
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val touchDiagnostics = com.shilapi.xcertplay.media.TouchSendDiagnostics()
     private val touchExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val tunnelExecutor: ExecutorService = Executors.newSingleThreadExecutor()
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -307,9 +309,7 @@ class CarPlayController(
         }
 
         override fun onCommand(session: AirPlaySession, type: String, params: Map<String, Any?>) {
-            debugLog(
-                "AirPlay command type=$type params=${params.keys.sorted().joinToString(",")}",
-            )
+            debugLog("AirPlay command ${CarPlayNegotiationSummary.command(type, params)}")
             if (
                 config.transport == CarPlayTransport.WIRELESS &&
                 !closed &&
@@ -339,7 +339,13 @@ class CarPlayController(
         uiListener = listener
         uiStatusReporter = reportStatus
         mainHandler.post {
-            if (uiListener === listener) lastReportedStatus?.let(reportStatus)
+            if (uiListener !== listener || closed) return@post
+            lastReportedStatus?.let(reportStatus)
+            // A recreated host must resume session observers even when the transport stayed connected.
+            val session = activeSession
+            if (session != null && uiListener === listener && !closed && activeSession === session) {
+                listener.onSessionActive(session)
+            }
         }
     }
 
@@ -390,7 +396,14 @@ class CarPlayController(
         if (closed) return false
         val session = activeSession ?: return false
         return try {
-            touchExecutor.execute { session.sendTouch(contacts) }
+            val queuedAtNs = System.nanoTime()
+            touchExecutor.execute {
+                val startNs = System.nanoTime()
+                val sent = session.sendTouch(contacts)
+                val endNs = System.nanoTime()
+                touchDiagnostics.onSent(contacts.size, contacts.count { it.down }, queuedAtNs, startNs, endNs, sent)
+                    ?.let { debugLog(it) }
+            }
             true
         } catch (_: Exception) {
             false
@@ -415,6 +428,24 @@ class CarPlayController(
         val session = activeSession ?: return false
         return try {
             touchExecutor.execute { session.sendMedia(index) }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /** Telephony descriptor array: Hook Switch (0x20) = 1, Drop (0x26) = 3. */
+    fun sendTelephonyButton(index: Int): Boolean = enqueueWheelCommand { it.sendTelephony(index) }
+
+    fun sendCarPlayHome(): Boolean = enqueueWheelCommand {
+        it.sendKnob(com.shilapi.xcertplay.airplay.AirPlayKnobState(home = true))
+    }
+
+    private fun enqueueWheelCommand(command: (AirPlaySession) -> Unit): Boolean {
+        if (closed) return false
+        val session = activeSession ?: return false
+        return try {
+            touchExecutor.execute { command(session) }
             true
         } catch (_: Exception) {
             false

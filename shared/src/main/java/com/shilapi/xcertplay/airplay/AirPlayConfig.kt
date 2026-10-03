@@ -22,6 +22,10 @@ data class AirPlayDisplayConfig(
     val initialUrl: String? = null,
     /** Display feature bits; null keeps the main-screen default (high-fidelity touch and knobs). */
     val features: Int? = null,
+    val adaptiveViewAreas: List<MainViewArea> = emptyList(),
+    val initialViewArea: Int = 0,
+    /** Request a separate corner mask rather than baking it into the main video. */
+    val separateCornerMasks: Boolean = false,
 )
 
 /** One OEM homescreen icon. */

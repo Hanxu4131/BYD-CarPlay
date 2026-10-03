@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.LegacyClusterMap" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowFullscreen">true</item>
+        <item name="android:backgroundDimEnabled">false</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+    <string name="legacy_cluster_title">唐 2023 / 21 平台仪表地图（实验）</string>
+    <string name="legacy_cluster_enable">开启旧平台独立仪表窗口</string>
+    <string name="legacy_cluster_description">在仪表显示 CarPlay 导航。请停车调整位置和大小，确认车速及告警仍然可见。</string>
+    <string name="legacy_cluster_target">目标逻辑屏幕（实验候选）</string>
+    <string name="legacy_cluster_check">检查 ADB 与屏幕（只读，可弹授权）</string>
+    <string name="legacy_cluster_checking">正在检查；如出现系统调试授权，请在车机确认…</string>
+    <string name="legacy_cluster_layout_values">水平 %1$d%% · 垂直 %2$d%% · 宽度 %3$d%%</string>
+    <string name="legacy_cluster_layout_help">位置和大小立即生效，地图保持完整比例。放大只调整投影区内的地图，请留出车速和告警的位置。切换显示内容需要重连。</string>
+    <string name="legacy_cluster_left">左移</string>
+    <string name="legacy_cluster_right">右移</string>
+    <string name="legacy_cluster_up">上移</string>
+    <string name="legacy_cluster_down">下移</string>
+    <string name="legacy_cluster_smaller">缩小</string>
+    <string name="legacy_cluster_larger">放大</string>
+    <string name="legacy_cluster_reset">恢复默认</string>
+    <string name="legacy_cluster_content">仪表显示内容</string>
+    <string name="legacy_l1_restore">地图之后显示 L1Mini 仪表</string>
+    <string name="legacy_l1_restore_help">地图窗口就绪后重新打开 L1Mini 仪表，避免地图盖住摄像头。需在 L1Mini 中开启仪表和开机启动。唤醒后已启动的 L1Mini 后台持续 30 秒未就绪时，每次唤醒最多恢复一次，摄像头会短暂中断。需要网络 ADB。</string>
+    <string name="legacy_cluster_map">地图</string>
+    <string name="legacy_cluster_turn_card">转向提示</string>
+    <string name="legacy_cluster_map_and_turn">地图加提示</string>
+    <string name="legacy_cluster_whole_area">调整整体显示区域</string>
+    <string name="legacy_cluster_key_area">调整导航关键信息区域</string>
+    <string name="legacy_cluster_turn_area">调整转弯提示区域</string>
+    <string name="legacy_cluster_turn_help">只移动转弯提示卡，不改地图、车位及车道信息。每次移动 0.5%，缩放 5%；边调边看，保存立即生效，不需要重连。取消恢复原位置。</string>
+    <string name="legacy_cluster_whole_help">边调边看仪表上的地图，确定后保存；取消恢复原设置。请为车速及告警留出位置。</string>
+    <string name="legacy_cluster_key_help">仪表上的细框仅用于对位，不代表 iPhone 已重新布局。每次移动 0.5%，缩放 5%；移动和缩放即时调整参考框，转弯提示卡位置独立。确定后保存并重连 iPhone，元素位置效果需实测。取消清除参考框，不改设置。</string>
+    <string name="legacy_cluster_key_values">中心水平 %1$.1f%% · 垂直 %2$.1f%% · 大小 %3$d%%</string>
+    <string name="legacy_cluster_confirm_save">确定并保存</string>
+    <string name="legacy_cluster_editor_expired">仪表连接已变化，请重新打开调整窗口。</string>
+</resources>

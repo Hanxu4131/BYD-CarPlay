@@ -3,6 +3,7 @@ package com.shilapi.xcertplay.airplay
 import android.util.Log
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
+import com.shilapi.xcertplay.diagnostics.CarPlayNegotiationSummary
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.Closeable
@@ -84,7 +85,7 @@ class AirPlaySession(
     private var eventSocket: Socket? = null
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
-    private var pendingNightMode: Boolean? = null
+    private val pendingAppearance = PendingAppearance()
     private val firstTouchSendLogged = AtomicBoolean(false)
     private val touchSendFailureLogged = AtomicBoolean(false)
     private val ntp = NtpClock()
@@ -122,6 +123,7 @@ class AirPlaySession(
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
+        pendingAppearance.clear()
         safeClose(socket)
         try {
             media.onSessionClosed(this)
@@ -143,6 +145,13 @@ class AirPlaySession(
         val url = config.cluster?.initialUrl ?: return false
         return sendCommand(mapOf("type" to "showUI", "params" to mapOf("uuid" to uuid, "url" to url))) &&
             sendCommand(mapOf("type" to "forceKeyFrame", "params" to mapOf("uuid" to uuid)))
+    }
+
+    fun requestMainViewArea(index: Int): Boolean = synchronized(eventWriteLock) {
+        if (closed.get() || config.hevc || index !in config.main.adaptiveViewAreas.indices) return@synchronized false
+        sendCommandLocked(mapOf("type" to "updateViewArea", "params" to mapOf(
+            "uuid" to AirPlayInfoPlist.MAIN_UUID, "animationDurationMillis" to 200,
+            "viewAreaIndex" to index, "adjacentViewAreas" to emptyList<Int>())), closeOnFailure = false)
     }
 
     fun sendCommand(command: Map<String, Any?>): Boolean = synchronized(eventWriteLock) {
@@ -168,7 +177,7 @@ class AirPlaySession(
         linkedMapOf("type" to "setVideoPlaybackAllowed", "params" to linkedMapOf("videoPlaybackAllowed" to allowed)),
     )
 
-    private fun sendCommandLocked(command: Map<String, Any?>, extraHeaders: String = ""): Boolean {
+    private fun sendCommandLocked(command: Map<String, Any?>, extraHeaders: String = "", closeOnFailure: Boolean = true): Boolean {
         val socket = eventSocket ?: return false
         val cipher = eventCipher ?: return false
         eventCseq++
@@ -177,7 +186,7 @@ class AirPlaySession(
             "Content-Type: $PLIST_CONTENT_TYPE\r\n" +
             "Content-Length: ${body.size}\r\n" +
             "CSeq: $eventCseq\r\n\r\n"
-        trace("airplay event tx headers=$head bodyHex=${body.toHex()}")
+        trace("airplay event tx command ${CarPlayNegotiationSummary.command(string(command["type"]), asMap(command["params"]))} bodyBytes=${body.size}")
         return try {
             val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
             val output = socket.getOutputStream()
@@ -186,7 +195,7 @@ class AirPlaySession(
             true
         } catch (error: Exception) {
             Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
-            close()
+            if (closeOnFailure) close()
             false
         }
     }
@@ -200,11 +209,9 @@ class AirPlaySession(
         val sent = sendHidReport(AirPlayHid.TOUCH_HID_UID, report)
         if (sent) com.shilapi.xcertplay.media.TouchLatencyProbe.onTouchSent(sendStartNs, System.nanoTime() - sendStartNs)
         if (sent && firstTouchSendLogged.compareAndSet(false, true)) {
-            val first = scaled.firstOrNull()
             Log.i(
                 TAG,
-                "airplay touch report sent contacts=${scaled.size} first=" +
-                    "(${first?.x},${first?.y},down=${first?.down}) report=${report.toHexString()}",
+                "airplay touch report sent contacts=${scaled.size} down=${scaled.count { it.down }} sent=true",
             )
         } else if (!sent && touchSendFailureLogged.compareAndSet(false, true)) {
             Log.w(TAG, "airplay touch dropped: event channel is not ready")
@@ -270,19 +277,18 @@ class AirPlaySession(
         }
     }
 
-    fun setNightMode(night: Boolean): Boolean = synchronized(eventWriteLock) {
-        pendingNightMode = night
-        sendPendingNightModeLocked()
+    fun setNightMode(night: Boolean): Boolean = setAppearance(night, manual = false)
+
+    fun setAppearance(night: Boolean, manual: Boolean): Boolean = synchronized(eventWriteLock) {
+        if (closed.get()) return@synchronized false
+        pendingAppearance.update(CarPlayAppearance(night, manual))
+        sendPendingAppearanceLocked()
     }
 
-    private fun sendPendingNightModeLocked(): Boolean {
-        val night = pendingNightMode ?: return true
-        val sent = sendCommandLocked(
-            linkedMapOf("type" to "setNightMode", "params" to linkedMapOf("nightMode" to night)),
-        )
-        if (sent) pendingNightMode = null
-        return sent
-    }
+    private fun sendPendingAppearanceLocked(): Boolean =
+        !closed.get() && pendingAppearance.flush(config.cluster != null) {
+            !closed.get() && sendCommandLocked(it)
+        }
 
     private fun sendHidReport(uid: Int, report: ByteArray): Boolean =
         sendCommand(
@@ -335,8 +341,7 @@ class AirPlaySession(
                         showInDebugOverlay,
                     )
                     trace(
-                        "airplay control rx headers=${request.headers} " +
-                            "bodyHex=${request.body.toHex()}",
+                        "airplay control rx method=${request.method} path=${request.path} bodyBytes=${request.body.size}",
                     )
                     val response = try {
                         handle(request)
@@ -353,7 +358,7 @@ class AirPlaySession(
                         showInDebugOverlay,
                     )
                     val wire = RtspMessage.buildResponse(request, response)
-                    trace("airplay control tx wireHex=${wire.toHex()}")
+                    trace("airplay control tx status=${response.status ?: 200} bodyBytes=${response.body.size}")
                     output.write(cipher?.encrypt(wire) ?: wire)
                     if (cipher == null && pairVerify.controlKeys != null) {
                         val keys = pairVerify.controlKeys!!
@@ -400,21 +405,14 @@ class AirPlaySession(
             }
             path.endsWith("/info") -> {
                 val info = AirPlayInfoPlist.build(config)
-                if (request.body.isNotEmpty()) {
-                    val requestInfo = try {
-                        BplistCodec.decode(request.body).toString()
-                    } catch (_: Exception) {
-                        "<unparseable ${request.body.size} bytes>"
-                    }
-                    debugLog("airplay /info request=$requestInfo")
-                }
+                if (request.body.isNotEmpty()) debugLog("airplay /info request present bytes=${request.body.size}")
                 Log.i(
                     TAG,
                     "airplay /info features=${info["features"]} " +
                         "audioFormats=${(info["audioFormats"] as? List<*>)?.size ?: 0} " +
                         "audioLatencies=${(info["audioLatencies"] as? List<*>)?.size ?: 0}",
                 )
-                debugLog("airplay /info displays=${info["displays"]}")
+                debugLog("airplay /info negotiation ${CarPlayNegotiationSummary.info(info)}")
                 RtspMessage.Response(
                     headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE),
                     body = BplistCodec.encode(info),
@@ -475,7 +473,7 @@ class AirPlaySession(
             val responseStreams = handleStreams(streams)
             debugLog("airplay SETUP response streams=$responseStreams")
             val body = BplistCodec.encode(linkedMapOf("streams" to responseStreams))
-            trace("airplay SETUP response bplistHex=${body.toHex()}")
+            trace("airplay SETUP response bodyBytes=${body.size}")
             return RtspMessage.Response(headers = mapOf("Content-Type" to PLIST_CONTENT_TYPE), body = body)
         }
 
@@ -511,7 +509,7 @@ class AirPlaySession(
         for (entry in streams) {
             val stream = asMap(entry) ?: continue
             val type = long(stream["type"])?.toInt() ?: continue
-            debugLog("airplay SETUP stream type=$type payload=$stream")
+            debugLog("airplay SETUP stream type=$type")
             when (type) {
                 STREAM_TYPE_MAIN_SCREEN, STREAM_TYPE_ALT_SCREEN -> {
                     val port = media.onScreen(this, type, stream)
@@ -559,7 +557,7 @@ class AirPlaySession(
         }
         val type = string(body["type"])
         val params = asMap(body["params"]) ?: emptyMap()
-        debugLog("airplay command type=$type keys=${params.keys.sorted()}")
+        debugLog("airplay command ${CarPlayNegotiationSummary.command(type, params)}")
         val streamId = request.headers["x-apple-streamid"]?.toLongOrNull()
         val data = params["data"] as? ByteArray
         if (streamId != null && data != null) {
@@ -585,10 +583,10 @@ class AirPlaySession(
         val types = teardownStreamTypes(decodedBody)
 
         debugLog(
-            "airplay TEARDOWN types=${types ?: "all"} activeBefore=$activeStreams " +
-                "body=${request.body.size} bytes payload=$decodedBody",
+            "airplay TEARDOWN requestedTypes=${types?.size ?: "all"} activeBefore=${activeStreams.size} " +
+                "body=${request.body.size} bytes",
         )
-        trace("airplay TEARDOWN raw${request.body.size}Hex=${request.body.toHex()}")
+        trace("airplay TEARDOWN body omitted bytes=${request.body.size}")
 
         if (types == null) {
             activeStreams.toList().forEach { media.onTeardown(this, it) }
@@ -678,7 +676,7 @@ class AirPlaySession(
             )
             eventCipher = ControlCipher(readKey, writeKey)
             synchronized(eventWriteLock) {
-                sendPendingNightModeLocked()
+                sendPendingAppearanceLocked()
             }
             runEventRead(socket)
         } catch (error: Exception) {
@@ -716,12 +714,14 @@ class AirPlaySession(
                     debugLog(
                         "airplay event rx ${message.method} ${message.path} cseq=${message.headers["cseq"] ?: "-"} body=${message.body.size}",
                     )
+                    if (message.method == "POST" && message.path == "/command") {
+                        debugLog("airplay event command ${CarPlayNegotiationSummary.eventCommand(message.body)}", uiVisible = false)
+                    }
                     val response = RtspMessage.buildResponse(message, RtspMessage.Response(status = 200))
                     trace(
-                        "airplay event rx headers=${message.headers} " +
-                            "bodyHex=${message.body.toHex()}",
+                        "airplay event rx method=${message.method} path=${message.path} bodyBytes=${message.body.size}",
                     )
-                    trace("airplay event tx wireHex=${response.toHex()}")
+                    trace("airplay event tx status=200 responseBytes=${response.size}")
                     synchronized(eventWriteLock) {
                         output.write(cipher.encrypt(response))
                         output.flush()
@@ -797,9 +797,6 @@ internal fun safeClose(closeable: Closeable?) {
         // Best-effort close.
     }
 }
-
-private fun ByteArray.toHex(): String =
-    joinToString(separator = "") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
 private fun asMap(value: Any?): Map<String, Any?>? {
     val map = value as? Map<*, *> ?: return null

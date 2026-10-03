@@ -39,8 +39,8 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".hudtest"
-            versionNameSuffix = "-hud-test"
+            applicationIdSuffix = ".tang21test"
+            versionNameSuffix = "-tang21-test31"
         }
         release {
             optimization {
@@ -55,6 +55,12 @@ android {
     }
     buildFeatures {
         compose = true
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.outputs.forEach { output -> output.versionCode.set(59) }
     }
 }
 

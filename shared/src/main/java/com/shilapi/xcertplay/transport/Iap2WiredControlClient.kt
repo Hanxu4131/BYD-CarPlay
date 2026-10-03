@@ -4,6 +4,7 @@ import com.shilapi.xcertplay.iap2.message.Iap2CarPlayMessages
 import com.shilapi.xcertplay.iap2.message.Iap2ControlMessages
 import com.shilapi.xcertplay.iap2.session.Iap2Session
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
+import com.shilapi.xcertplay.diagnostics.CarPlayNegotiationSummary
 import com.shilapi.xcertplay.mfi.Iap2MfiAuthenticationClient
 import java.net.Inet6Address
 import java.net.InetAddress
@@ -95,10 +96,11 @@ class Iap2WiredControlClient(
                         onProgress(carPlayAvailabilitySummary(incoming.payload))
                         // LIVI sends its wired answer on every availability notification; do not gate it on
                         // the phone's advertised availability boolean.
-                        send(carPlayStartSession(endpoint), deadlineNanos)
+                        val startSession = carPlayStartSession(endpoint)
+                        send(startSession, deadlineNanos)
                         stage = Iap2WiredControlStage.CARPLAY_START_SENT
                         carPlayStartSessions++
-                        onProgress("iap2 tx=0x4301 carplay-start-session")
+                        onProgress("iap2 tx=0x4301 carplay-start-session ${CarPlayNegotiationSummary.startSession(startSession)}")
                     }
 
                     Iap2LocationMessages.START_LOCATION_INFORMATION, Iap2LocationMessages.STOP_LOCATION_INFORMATION -> {
@@ -152,14 +154,7 @@ class Iap2WiredControlClient(
             )
 
         fun carPlayAvailabilitySummary(payload: ByteArray): String {
-            return try {
-                val availability = Iap2CarPlayMessages.availability(payload).wired
-                val available = availability?.available
-                val transport = availability?.identifier
-                "iap2 4300 wiredAvailable=$available usbTransport=${transport ?: "none"}"
-            } catch (error: RuntimeException) {
-                "iap2 4300 decode failed: ${error.message}"
-            }
+            return "iap2 4300 ${CarPlayNegotiationSummary.availability(payload)}"
         }
 
         private fun requireRemaining(deadlineNanos: Iap2ControlDeadline): Long = remainingMillis(deadlineNanos).also {

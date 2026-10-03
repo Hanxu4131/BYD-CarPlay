@@ -172,8 +172,20 @@ object AirPlayInfoPlist {
             "primaryInputDevice" to display.primaryInputDevice,
         )
 
-        entry["viewAreas"] = listOf(areaDict(display))
-        entry["initialViewArea"] = 0
+        if (type == 110 && display.separateCornerMasks) entry["cornerMasks"] = true
+        val areas = display.adaptiveViewAreas
+        if (type == 110 && areas.isNotEmpty()) {
+            require(areas.size <= 4 && areas.all { it.valid(display.widthPixels, display.heightPixels) })
+            require(display.initialViewArea in areas.indices)
+            entry["viewAreas"] = areas.map { area -> linkedMapOf<String, Any?>(
+                "widthPixels" to area.width, "heightPixels" to area.height,
+                "originXPixels" to area.x, "originYPixels" to area.y,
+                "adjacentViewAreas" to emptyList<Int>()) }
+            entry["initialViewArea"] = display.initialViewArea
+        } else {
+            entry["viewAreas"] = listOf(areaDict(display))
+            entry["initialViewArea"] = 0
+        }
         if (display.initialUrl != null) entry["initialURL"] = display.initialUrl
         return entry
     }

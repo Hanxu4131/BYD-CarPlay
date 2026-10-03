@@ -38,3 +38,13 @@ release-signing.properties
 *.key
 *.apk
 *.aab
+
+# Private vehicle, handset and connection records
+/runtime-assets/
+/vehicle-logs/
+/device-data/
+*.pcap
+*.pcapng
+*.adbkey
+.env
+.env.*

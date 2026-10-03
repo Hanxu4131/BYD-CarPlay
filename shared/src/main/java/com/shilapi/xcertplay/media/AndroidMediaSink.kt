@@ -20,6 +20,8 @@ import com.shilapi.xcertplay.airplay.AudioStreamId
 import com.shilapi.xcertplay.airplay.MediaSink
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
 import com.shilapi.xcertplay.airplay.VideoCodec
+import com.shilapi.xcertplay.airplay.MainAreaViewport
+import com.shilapi.xcertplay.airplay.MainAreaSelection
 import com.shilapi.xcertplay.airplay.toHexString
 import java.io.Closeable
 import java.nio.ByteBuffer
@@ -136,7 +138,34 @@ class AndroidMediaSink(
     private val onAudioDiagnostic: (String) -> Unit = {},
     /** True while any music ("media") audio stream is running; called from media threads. */
     private val onMediaAudioChanged: (Boolean) -> Unit = {},
+    val adaptiveSelection: MainAreaSelection? = null,
 ) : MediaSink {
+    private companion object {
+        const val MAIN_SCREEN_TYPE = 110
+    }
+
+    override val adaptiveMainViewportEnabled: Boolean get() = adaptiveSelection != null
+    @Volatile private var viewportChanged: (() -> Unit)? = null
+    @Volatile private var mainGeometry: MainAreaViewport? = null
+    private var lastAdaptiveGeometryLog: String? = null
+    fun setViewportChangedListener(listener: (() -> Unit)?) { viewportChanged = listener; listener?.invoke() }
+    @Synchronized fun clearViewportChangedListener(listener: (() -> Unit)?) {
+        if (viewportChanged === listener) viewportChanged = null
+    }
+    override fun onVideoGeometry(type: Int, codec: VideoCodec, geometry: MainAreaViewport?) {
+        if (type != MAIN_SCREEN_TYPE || adaptiveSelection == null) return
+        if (codec != VideoCodec.H264) mainGeometry = null
+        else geometry?.takeIf { it.valid() && it.codedWidth <= adaptiveSelection.canvasWidth && it.codedHeight <= adaptiveSelection.canvasHeight }?.let { mainGeometry = it }
+        val matched = adaptiveSelection.receive(codec, geometry)
+        val line = "Adaptive H264: geometry=$geometry matched=$matched; ${if (matched) "viewport confirmed" else "keeping fit"}"
+        if (line != lastAdaptiveGeometryLog) {
+            lastAdaptiveGeometryLog = line
+            Log.i("DiPlay-AdaptiveDisplay", line)
+            onAudioDiagnostic(line)
+        }
+        viewportChanged?.invoke()
+    }
+
     private val appContext = context?.applicationContext
     private val audioFocusCoordinator = AudioFocusCoordinator(
         appContext,
@@ -160,6 +189,8 @@ class AndroidMediaSink(
     private val mirrorLock = Any()
     private val mirrorSurfaces = HashMap<Pair<Int, String>, Surface>()
     private val mirrorDecoders = HashMap<Pair<Int, String>, VideoDecoder>()
+    private val mirrorFrameListeners = HashMap<Pair<Int, String>, () -> Unit>()
+    private val mirrorPresentedListeners = HashMap<Pair<Int, String>, () -> Unit>()
     private val lastVideoConfig = ConcurrentHashMap<Int, Pair<VideoCodec, ByteArray>>()
     private val recoveryExecutor = Executors.newSingleThreadExecutor { task ->
         Thread(task, "carplay-video-recovery").apply { isDaemon = true }
@@ -185,6 +216,16 @@ class AndroidMediaSink(
     }
 
     fun setSurface(type: Int, surface: Surface) {
+        val conflictingTypes = VideoSurfaceRouting.otherTypesUsing(type, surface, surfaces)
+        if (type == MAIN_SCREEN_TYPE) {
+            conflictingTypes.forEach { otherType ->
+                surfaces.remove(otherType, surface)
+                videoDecoders[otherType]?.setSurface(null)
+            }
+        } else if (conflictingTypes.isNotEmpty()) {
+            Log.w("xcertplay-usb", "video surface rejected for stream=$type because another stream already owns it")
+            return
+        }
         surfaces[type] = surface
         videoDecoders[type]?.setSurface(surface)
     }
@@ -197,23 +238,46 @@ class AndroidMediaSink(
      * Also decodes stream [type] onto [surface] with its own decoder, one per [key], which
      * starts at the next keyframe it asks for; null stops it. The stream's own surface is not affected.
      */
-    fun setMirrorSurface(type: Int, key: String, surface: Surface?) {
+    fun setMirrorSurface(type: Int, key: String, surface: Surface?, onFirstFrameRendered: (() -> Unit)? = null, onFirstFramePresented: (() -> Unit)? = null) {
         val id = type to key
         synchronized(mirrorLock) {
             mirrorDecoders.remove(id)?.close()
             if (surface == null) {
                 mirrorSurfaces.remove(id)
+                mirrorFrameListeners.remove(id)
+                mirrorPresentedListeners.remove(id)
                 return
             }
             mirrorSurfaces[id] = surface
+            if (onFirstFrameRendered == null) mirrorFrameListeners.remove(id)
+            else mirrorFrameListeners[id] = onFirstFrameRendered
+            if (onFirstFramePresented == null) mirrorPresentedListeners.remove(id)
+            else mirrorPresentedListeners[id] = onFirstFramePresented
         }
-        lastVideoConfig[type]?.let { (codec, data) -> mirrorDecoders(type).forEach { it.configure(codec, data) } }
+        lastVideoConfig[type]?.let { (codec, data) ->
+            val geometry = if (type == MAIN_SCREEN_TYPE && adaptiveSelection != null && codec == VideoCodec.H264) mainGeometry else null
+            mirrorDecoders(type).forEach { it.configure(codec, data, geometry?.codedWidth, geometry?.codedHeight) }
+        }
     }
 
     private fun mirrorDecoders(type: Int): List<VideoDecoder> = synchronized(mirrorLock) {
         if (mirrorSurfaces.isEmpty()) return emptyList()
         mirrorSurfaces.filterKeys { it.first == type }.map { (id, surface) ->
-            mirrorDecoders.getOrPut(id) { newVideoDecoder(type, surface, " stream=$type mirror=${id.second}") }
+            mirrorDecoders.getOrPut(id) {
+                lateinit var mirror: VideoDecoder
+                mirror = newVideoDecoder(type, surface, " stream=$type mirror=${id.second}",
+                    onFirstFrameRendered = {
+                        synchronized(mirrorLock) {
+                            if (mirrorDecoders[id] === mirror && mirrorSurfaces[id] === surface) mirrorFrameListeners[id]?.invoke()
+                        }
+                    },
+                    onFirstFramePresented = {
+                        synchronized(mirrorLock) {
+                            if (mirrorDecoders[id] === mirror && mirrorSurfaces[id] === surface) mirrorPresentedListeners[id]?.invoke()
+                        }
+                    })
+                mirror
+            }
         }
     }
 
@@ -231,8 +295,9 @@ class AndroidMediaSink(
     override fun onVideoConfig(type: Int, codecData: ByteArray) {
         val codec = pendingVideoCodec[type] ?: VideoCodec.H264
         lastVideoConfig[type] = codec to codecData
-        videoDecoder(type).configure(codec, codecData)
-        mirrorDecoders(type).forEach { it.configure(codec, codecData) }
+        val geometry = if (type == MAIN_SCREEN_TYPE && adaptiveSelection != null && codec == VideoCodec.H264) mainGeometry else null
+        videoDecoder(type).configure(codec, codecData, geometry?.codedWidth, geometry?.codedHeight)
+        mirrorDecoders(type).forEach { it.configure(codec, codecData, geometry?.codedWidth, geometry?.codedHeight) }
     }
 
     override fun onVideoFrame(type: Int, naluBytes: ByteArray) {
@@ -242,6 +307,7 @@ class AndroidMediaSink(
 
     override fun onScreenStreamActive(type: Int, active: Boolean) {
         if (!active) {
+            if (type == MAIN_SCREEN_TYPE) { adaptiveSelection?.reset(); mainGeometry = null; viewportChanged?.invoke() }
             videoRecoveryHandlers.remove(type)
             videoDiagnosticHandlers.remove(type)
             videoDecoders.remove(type)?.close()
@@ -290,6 +356,8 @@ class AndroidMediaSink(
     }
 
     fun close() {
+        adaptiveSelection?.reset()
+        viewportChanged = null
         synchronized(screenStateLock) {
             activeScreenTypes.forEach { screenStreamActiveChanged?.invoke(it, false) }
             activeScreenTypes.clear()
@@ -301,6 +369,8 @@ class AndroidMediaSink(
             mirrorDecoders.values.forEach(VideoDecoder::close)
             mirrorDecoders.clear()
             mirrorSurfaces.clear()
+            mirrorFrameListeners.clear()
+            mirrorPresentedListeners.clear()
         }
         videoRecoveryHandlers.clear()
         videoDiagnosticHandlers.clear()
@@ -314,9 +384,15 @@ class AndroidMediaSink(
     }
 
     private fun videoDecoder(type: Int): VideoDecoder =
-        videoDecoders.computeIfAbsent(type) { newVideoDecoder(type, surfaces[type] ?: defaultSurface) }
+        videoDecoders.computeIfAbsent(type) {
+            newVideoDecoder(type, surfaces[type] ?: VideoSurfaceRouting.defaultFor(type, defaultSurface))
+        }
 
-    private fun newVideoDecoder(type: Int, surface: Surface?, statsLabel: String? = null) = VideoDecoder(
+    private fun newVideoDecoder(
+        type: Int, surface: Surface?, statsLabel: String? = null,
+        onFirstFrameRendered: (() -> Unit)? = null,
+        onFirstFramePresented: (() -> Unit)? = null,
+    ) = VideoDecoder(
         type,
         surface,
         videoWidth,
@@ -325,6 +401,8 @@ class AndroidMediaSink(
         requestKeyFrame = { requestVideoRecovery(type) },
         report = { videoDiagnosticHandlers[type]?.invoke(it) },
         statsLabel = statsLabel,
+        onFirstFrameRendered = onFirstFrameRendered,
+        onFirstFramePresented = onFirstFramePresented,
     )
 
     @Synchronized
@@ -346,6 +424,32 @@ class AndroidMediaSink(
     }
 }
 
+/** Prevents independent CarPlay screen decoders from connecting to the same BufferQueue. */
+internal object VideoSurfaceRouting {
+    fun <T> defaultFor(type: Int, defaultSurface: T?): T? =
+        if (type == 110) defaultSurface else null
+
+    fun otherTypesUsing(type: Int, surface: Any, assigned: Map<Int, *>): List<Int> =
+        assigned.filter { (otherType, otherSurface) -> otherType != type && otherSurface === surface }.keys.toList()
+}
+
+/** Either the platform presentation callback or two released picture buffers can confirm readiness. */
+internal class VideoFrameReadiness(
+    private val current: () -> Boolean,
+    private val notify: (String) -> Unit,
+) {
+    private val completed = AtomicBoolean(false)
+    private val outputs = AtomicInteger()
+
+    fun outputReleased(): Boolean = outputs.incrementAndGet() == 2 && !completed.get()
+    fun codecRendered() = confirm("codec_callback")
+    fun decodedOutputsReady() = confirm("decoded_output")
+
+    private fun confirm(source: String) {
+        if (current() && completed.compareAndSet(false, true)) notify(source)
+    }
+}
+
 /** Serial MediaCodec video decoder: one worker owns configure and frame feeding. */
 private class VideoDecoder(
     streamType: Int,
@@ -356,23 +460,28 @@ private class VideoDecoder(
     private val requestKeyFrame: () -> Unit,
     private val report: (String) -> Unit,
     statsLabel: String? = null,
+    private val onFirstFrameRendered: (() -> Unit)? = null,
+    private val onFirstFramePresented: (() -> Unit)? = null,
 ) : Closeable {
     private val queue = VideoDecodeQueue()
     @Volatile private var running = true
     @Volatile private var decoder: MediaCodec? = null
-    private var outputSurface: Surface? = surface
+    @Volatile private var outputSurface: Surface? = surface
     private var lastConfig: VideoJob.Config? = null
     private var renderedFrameLogged = false
     private var submittedFrameLogged = false
+    private var frameReadiness: VideoFrameReadiness? = null
+    private val readinessHandler = Handler(Looper.getMainLooper())
     private var duplicateConfigLogged = false
     private val referenceChain = VideoReferenceChain()
+    private val frameTiming = VideoFrameTiming()
     private var lastKeyFrameRequestNs = 0L
     // The main screen keeps the historical log format; other screens are labelled.
     private val stats = VideoStats(statsLabel ?: if (streamType == 110) "" else " stream=$streamType")
     private val thread = Thread(::run, "carplay-video").apply { isDaemon = true; start() }
 
-    fun configure(codec: VideoCodec, codecData: ByteArray) {
-        queue.offer(VideoJob.Config(codec, codecData))
+    fun configure(codec: VideoCodec, codecData: ByteArray, codedWidth: Int? = null, codedHeight: Int? = null) {
+        queue.offer(VideoJob.Config(codec, codecData, codedWidth, codedHeight))
     }
 
     fun submit(nalus: ByteArray) {
@@ -400,7 +509,7 @@ private class VideoDecoder(
                             if (System.nanoTime() - job.receivedNs > MAX_FRAME_AGE_NS) {
                                 queue.discardFrames()
                                 recover("video backlog exceeded 250 ms")
-                            } else feed(job.nalus)
+                            } else feed(job.nalus, job.receivedNs)
                         }
                         is VideoJob.SurfaceChanged -> changeSurface(job.surface)
                         is VideoJob.Resync -> recover("video queue overflow")
@@ -428,8 +537,7 @@ private class VideoDecoder(
         val previous = lastConfig
         if (
             decoder != null &&
-            previous?.codec == config.codec &&
-            previous.codecData.contentEquals(config.codecData)
+            previous?.sameDecoderConfig(config, width, height) == true
         ) {
             if (!duplicateConfigLogged) {
                 duplicateConfigLogged = true
@@ -468,16 +576,16 @@ private class VideoDecoder(
             if (next != null) break
         }
         if (next == null) {
-            report("decoder configuration failed mime=$mime size=${width}x$height")
+            report("decoder configuration failed mime=$mime size=${config.codedWidth ?: width}x${config.codedHeight ?: height}")
         }
         decoder = next
         renderedFrameLogged = false
         submittedFrameLogged = false
         if (next != null) {
-            report("decoder=${next.name} mime=$mime size=${width}x$height")
+            report("decoder=${next.name} mime=$mime size=${config.codedWidth ?: width}x${config.codedHeight ?: height}")
             Log.i(
                 TAG,
-                "video decoder configured name=${next.name} mime=$mime size=${width}x$height",
+                "video decoder configured name=${next.name} mime=$mime size=${config.codedWidth ?: width}x${config.codedHeight ?: height}",
             )
         }
     }
@@ -485,7 +593,7 @@ private class VideoDecoder(
     private data class DecoderAttempt(val codecName: String?, val tuned: Boolean)
 
     private fun buildFormat(mime: String, csd: List<ByteArray>, tuned: Boolean): MediaFormat =
-        MediaFormat.createVideoFormat(mime, width, height).apply {
+        MediaFormat.createVideoFormat(mime, lastConfig?.codedWidth ?: width, lastConfig?.codedHeight ?: height).apply {
             if (tuned) {
                 setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, MAX_INPUT_SIZE)
                 setInteger(MediaFormat.KEY_PRIORITY, 0)
@@ -509,6 +617,17 @@ private class VideoDecoder(
                 format.setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             }
             codec.configure(format, surface, null, 0)
+            if (onFirstFrameRendered != null) {
+                val readiness = VideoFrameReadiness(
+                    current = { running && decoder === codec && outputSurface === surface && surface.isValid },
+                    notify = { source ->
+                        Log.w(TAG, "mirror first frame readiness=$source")
+                        onFirstFrameRendered?.invoke()
+                    },
+                )
+                frameReadiness = readiness
+            }
+            listenForPresentedFrames(codec, surface)
             codec.start()
             codec
         } catch (error: Exception) {
@@ -560,7 +679,10 @@ private class VideoDecoder(
         val codec = decoder
         if (codec != null) {
             try {
+                // Invalidate the old surface's pending timestamps before changing its output.
+                frameTiming.reset()
                 codec.setOutputSurface(surface)
+                listenForPresentedFrames(codec, surface)
                 Log.i(TAG, "video decoder output surface updated")
                 return
             } catch (error: Exception) {
@@ -571,7 +693,7 @@ private class VideoDecoder(
         lastConfig?.let(::configureDecoder)
     }
 
-    private fun feed(nalus: ByteArray) {
+    private fun feed(nalus: ByteArray, receivedNs: Long) {
         val annexB = MediaCodecSupport.toAnnexB(nalus)
         val config = lastConfig ?: return
         if (outputSurface == null) return
@@ -599,7 +721,10 @@ private class VideoDecoder(
         input.clear()
         if (annexB.size <= input.remaining()) {
             input.put(annexB)
-            codec.queueInputBuffer(index, 0, annexB.size, System.nanoTime() / 1000, 0)
+            val submittedNs = System.nanoTime()
+            val ptsUs = submittedNs / 1000
+            frameTiming.submitted(ptsUs, receivedNs, submittedNs)?.let(stats::onSubmitted)
+            codec.queueInputBuffer(index, 0, annexB.size, ptsUs, 0)
             referenceChain.onQueued()
         } else {
             recover("video frame exceeded codec input capacity")
@@ -634,8 +759,23 @@ private class VideoDecoder(
                 index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> logOutputFormat(codec.outputFormat)
                 index >= 0 -> {
                     val render = outputSurface != null
+                    val picture = info.flags and (MediaCodec.BUFFER_FLAG_CODEC_CONFIG or
+                        MediaCodec.BUFFER_FLAG_END_OF_STREAM) == 0
+                    val outputAges = if (render && picture) {
+                        frameTiming.released(info.presentationTimeUs, System.nanoTime())
+                    } else null
                     codec.releaseOutputBuffer(index, render)
-                    if (render) stats.onRendered()
+                    if (render && picture) frameReadiness?.let { readiness ->
+                        if (readiness.outputReleased()) {
+                            // Some car decoders never emit OnFrameRendered. Confirm submitted picture
+                            // output after a short Surface settling interval, only for this decoder/surface.
+                            readinessHandler.postDelayed({ readiness.decodedOutputsReady() }, 80L)
+                        }
+                    }
+                    if (render) {
+                        stats.onRendered()
+                        outputAges?.let(stats::onReleasedAge)
+                    }
                     if (render && !renderedFrameLogged) {
                         renderedFrameLogged = true
                         report("first frame rendered")
@@ -646,6 +786,25 @@ private class VideoDecoder(
                 else -> return
             }
         }
+    }
+
+    private fun listenForPresentedFrames(codec: MediaCodec, surface: Surface) {
+        val epoch = frameTiming.reset()
+        val readiness = frameReadiness
+        var presentedNotified = false
+        runCatching {
+            codec.setOnFrameRenderedListener({ renderedCodec, ptsUs, renderedNs ->
+                if (running && renderedCodec === codec && decoder === codec &&
+                    outputSurface === surface && surface.isValid && frameTiming.isCurrent(epoch)) {
+                    frameTiming.presented(epoch, ptsUs, renderedNs)?.let(stats::onPresented)
+                    readiness?.codecRendered()
+                    if (!presentedNotified) {
+                        presentedNotified = true
+                        onFirstFramePresented?.invoke()
+                    }
+                }
+            }, readinessHandler)
+        }.onFailure { Log.w(TAG, "video frame presentation listener unavailable", it) }
     }
 
     private fun logOutputFormat(format: MediaFormat) {
@@ -670,6 +829,8 @@ private class VideoDecoder(
 
     @Synchronized
     private fun releaseDecoder() {
+        frameTiming.reset()
+        frameReadiness = null
         val codec = decoder
         decoder = null
         if (codec != null) {
@@ -722,6 +883,8 @@ private class AudioRenderer(
 
     private var trackAttributes: AudioAttributes? = null
     private var mappedChannel: AudioChannel? = null
+    private val navigationPlaybackToken = NavigationPlayback.open()
+    private var actualLegacyStreamType: Int? = null
     private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
     @Volatile private var running = true
     @Volatile private var started = false
@@ -787,6 +950,7 @@ private class AudioRenderer(
 
     override fun close() {
         running = false
+        NavigationPlayback.close(navigationPlaybackToken)
         thread.interrupt()
     }
 
@@ -884,6 +1048,7 @@ private class AudioRenderer(
                 .build()
         } else {
             val streamType = streamOverride
+            actualLegacyStreamType = streamType
             routeLabel = "streamType=$streamType"
             built = LegacyAudioFallback.build(
                 createLegacy = {
@@ -893,6 +1058,7 @@ private class AudioRenderer(
                 isInitialized = { it.state == AudioTrack.STATE_INITIALIZED },
                 release = { it.release() },
                 createFallback = {
+                    actualLegacyStreamType = null
                     routeLabel = "streamType=$streamType(fallback=usage)"
                     Log.w(TAG, "streamType=$streamType rejected by this ROM; falling back to usage-based track")
                     AudioTrack.Builder()
@@ -1219,6 +1385,7 @@ private class AudioRenderer(
             writtenFramesThisWindow += framesWritten
             bufferProgress.written(count)
             lastPcmWriteNs = System.nanoTime()
+            if (playbackStarted) reportNavigationPlayback(track)
             if (!playbackStarted) {
                 prebufferBytes += count
                 if (prebufferBytes >= startThresholdBytes) {
@@ -1233,6 +1400,17 @@ private class AudioRenderer(
         underrunsAtPlaybackStart = track.underrunCount
         track.play()
         playbackStarted = true
+        reportNavigationPlayback(track)
+    }
+
+    private fun reportNavigationPlayback(track: AudioTrack) {
+        if (!running || mappedChannel != AudioChannel.NAVIGATION) return
+        // This optional UI hint must never interrupt sound on a ROM with unusual track behavior.
+        runCatching {
+            val pendingFrames = bufferProgress.queuedBytes(track.playbackHeadPosition) / frameBytes
+            val bufferedMillis = (pendingFrames * 1000L + format.sampleRate - 1L) / format.sampleRate
+            NavigationPlayback.played(navigationPlaybackToken, actualLegacyStreamType, bufferedMillis)
+        }
     }
 
     private fun maintainPlaybackBuffer() {
@@ -1319,6 +1497,7 @@ private class AudioRenderer(
 
     @Synchronized
     private fun release() {
+        NavigationPlayback.close(navigationPlaybackToken)
         abandonAudioFocus()
         val codec = codec
         this.codec = null

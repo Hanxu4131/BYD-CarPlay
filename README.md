@@ -1,60 +1,37 @@
-# DiPlay
+# BYD CarPlay
 
-**CarPlay for compatible BYD Android head units.** Wired and wireless, with the familiar DiAuto interface. Independent app: `com.shihab.diplay`.
+寒叙（[@Hanxu4131](https://github.com/Hanxu4131)）基于 [DiPlay](https://github.com/shihabal3amri/DiPlay) 做的个人二次开发版，主要适配2023款唐 DM-i、21平台／控制器。
 
-> **BYD support scope:** These projects focus on BYD cars. They may work on other brands, but other brands are unsupported and there are no plans to add support or fix brand-specific incompatibilities.
+当前保存已在本车使用的 **test31** 源码，基于 DiPlay 0.2.9。它还没有合入上游0.2.10；近期更新的评估见 [上游更新对比](docs/UPSTREAM_UPDATE_REVIEW.md)。
 
-[Download & website](https://shihabal3amri.github.io/DiPlay/) · [Release](https://github.com/shihabal3amri/DiPlay/releases/tag/v0.2.9) · [Report a problem](https://github.com/shihabal3amri/DiPlay/issues/new/choose)
+主要改动：
 
-![DiPlay home](site/assets/home.png)
+- 旧平台仪表地图窗口，整体区域、关键信息与转弯提示位置调整、缩放、实时预览和保存。
+- 仪表启动失败的静默5秒重试，以及L1Mini显示顺序和受限唤醒恢复。
+- 嘟嘟桌面分屏／全屏，连接成功与再次打开直接进入CarPlay；H.264下保持连接并重新排版。
+- 车机深浅外观跟随、原车歌曲信息同步、歌手显示选项、方向盘按键映射和重启按钮。
+- 仪表与中控加载画面、分屏切换过渡和直角显示。
 
-## 0.2.9 — public preview
+[完整修改及验证边界](docs/CURRENT_ADAPTATION.md) · [上游贡献草稿](docs/UPSTREAM_CONTRIBUTION.md) · [作者](AUTHORS.md)
 
-Install on the **car**, not the iPhone. No jailbreak, dongle, Mac, account or authentication server is required for use. Core CarPlay does not require ADB; optional dashboard, battery, wheel-speed and parked-video features do. Your head unit must permit APK installation. Wireless supports Wi-Fi Direct or the car’s existing hotspot; Wi-Fi Direct requires Android 10+; the APK supports Android 9+ for wired use.
+## 构建
 
-- Wired USB and wireless CarPlay with local authentication.
-- BYD HUD navigation with arrows, distance and street names on verified firmware.
-- Car hotspot support, improved audio buffering and saved receive diagnostics.
-- Automatic address discovery, fixed-channel Wi-Fi fallbacks and successful-configuration memory.
-- Icon/text size, resolution and frame rate; applying a display change reconnects CarPlay.
-- Local diagnostic export. Reports are sent only if you choose to share them.
-- Separate installation alongside DiAuto. Run one projection app at a time.
+需要JDK25、Android SDK37、NDK28.2.13676358，使用仓库内Gradle wrapper。
 
-This is **not an Apple-certified product**. The APK bundles an experimental accessory identity recovered from public Carlinkit firmware, not a newly provisioned MFi identity for DiPlay. A bundled private key is extractable. Acceptance after future iOS updates, reliability across head units and suitability of that identity for general distribution are unresolved. This release invites community testing; it is not a guarantee of universal compatibility.
+```sh
+./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :mobile:lintDebug :mobile:assembleDebug
+```
 
-Earlier releases were tested on the development DiLink5.1 car: live windshield guidance and street names work, Car hotspot now starts CarPlay, and Wi-Fi Direct performance is substantially improved. Occasional audio cutouts remain and are deferred to a later update. The floating-map test build was installed on the development DiLink 5.1 car; feedback led to the pinch corrections in this release. Earlier wheel-speed and video contributions were tested on a BYD Tang with DiLink 5.0 and an iPhone 15 Pro on iOS 27; wheel-speed dead reckoning in tunnels remains unverified. Broader head-unit and iOS compatibility is not guaranteed. The HUD firmware scope and cleanup limits are documented in [BYD navigation](docs/BYD_NAVIGATION.md).
+普通源码构建不包含CarPlay认证身份。需要独立运行时，通过本机环境变量`DIPLAY_AUTH_ASSETS_DIR`明确选择外部身份文件；不得把这些文件或Android签名密钥提交进Git。调试版本沿用本车安装ID `com.shihab.diplay.tang21test`、版本代码59，更新现有安装还需要原来的签名。[构建说明](docs/BUILD.md)。
 
-## What’s new in 0.2.9
+## 说明
 
-- Optional floating dashboard map on the centre screen: drag to move, pinch to resize, and tap to open CarPlay. The dashboard keeps its map; permission to draw over other apps is required.
-- Smoother map resizing, with no size jump when placing two fingers and immediate resizing away from the minimum or maximum.
-- Optional dashboard song title, artist and play/pause status through network ADB.
-- CarPlay navigation widget with turn, road, distance, arrival information and song, for launchers that support standard Android widgets.
-- Optional live-map embedding for compatible launchers on Android 11+, with developer map-host and DiPlay Home samples. Map sharing is off by default.
-- CarPlay follows BYD day/night changes and stays connected through camera resizing during an existing full-screen session. Connecting in a narrow camera window requires one reconnect when it grows.
-- Media and navigation audio stream choices 0–20, preserving older saved navigation selections.
-- Ukrainian app and website support; GPS no longer reports a northbound course when direction is unknown.
+本仓库完整保留应用源码、构建脚本、测试和适配记录，不包含认证／签名资产、第三方APK、车机日志和设备资料；普通源码APK无法替代本机已配置身份的独立安装包。
 
-The navigation widget requires a launcher that accepts standard Android widgets; BYD’s built-in home does not accept arbitrary widgets. Floating and embedded maps require **CarPlay map on instrument cluster** to be enabled. The sample apps are developer examples supplied in source. See [release notes](docs/RELEASE-NOTES-0.2.9.md) for details.
+实际CarPlay Ultra仪表主题和原车滚轮导航音量调整尚未实现。加载画面的Ultra标识只是视觉效果。L1Mini是独立软件，未内置或修改其APK。H.264分屏实测结果不能外推为HEVC、其他固件或所有屏幕均支持。
 
-## Documentation
+提交给上游时保留 **DiPlay** 名称和默认包名。BYD CarPlay只是本人的应用名，不代表比亚迪或Apple官方产品。
 
-- [Install and connect](docs/INSTALL.md)
-- [Compatibility and troubleshooting](docs/COMPATIBILITY.md)
-- [Privacy and diagnostic reports](docs/PRIVACY.md)
-- [Build from source](docs/BUILD.md)
-- [Validation](docs/VALIDATION.md)
-- [Release notes](CHANGELOG.md)
-- [Credits and licenses](docs/THIRD_PARTY_NOTICES.md)
+## 来源与许可证
 
-The website is available in English, Arabic, Russian, Ukrainian, Spanish and Simplified Chinese. The app interface supports those same six languages. Choose the app language in Settings; on Android 13+, it stays synchronized with Android’s per-app language setting.
-
-## Source and credits
-
-Based on [xcertplay](https://github.com/shilapi/xcertplay), GPL-3.0. The home/settings UI and website adapt [DiAuto](https://github.com/shihabal3amri/DiAuto), AGPL-3.0; that license is included in `docs/licenses`. Preserve those notices when distributing modifications. CarPlay and its icon belong to Apple Inc.; no Apple or BYD affiliation or endorsement is implied.
-
-This repository starts with a clean public source snapshot. Local research, tester reports and release-signing secrets are excluded. The complete source corresponding to the APK is provided with every release; experimental runtime identity assets are described separately in the build instructions and notices.
-
-## Local release packaging
-
-The release APK intentionally contains the experimental accessory identity. The Git repository and source archive exclude all accessory and Android signing keys; tests generate synthetic identities at runtime. Source/CI builds omit runtime identity assets by default. Local release builds explicitly select an external asset directory. Publishing the APK makes its bundled identity extractable; building locally does not preserve that identity's confidentiality.
+保留DiPlay、xcertplay、DiAuto及已有贡献者署名与许可证：[LICENSE](LICENSE) · [第三方说明](docs/THIRD_PARTY_NOTICES.md) · [原DiPlay说明](docs/DIPLAY_0_2_9_README.md)。代码、Apple标识与BYDMate图像的许可分别处理；Apple及BYDMate图像不因存入本仓库而成为本人创作或被重新授予代码许可证。公开源码的新增加载图形使用中性图案及应用名；私用版Apple描摹图未上传。仓库不自动发布上游下载网站。
