@@ -2,7 +2,7 @@
 
 寒叙（[@Hanxu4131](https://github.com/Hanxu4131)）基于 [DiPlay](https://github.com/shihabal3amri/DiPlay) 做的个人二次开发版，主要适配2023款唐 DM-i、21平台／控制器。
 
-当前分支为 **0.2.10部分更新候选源码**，从DiPlay 0.2.9/test31开始，已移植歌曲元数据与封面、通话音效及电池协议更新；完整test31保留在main分支。[迁移内容及核验](docs/UPSTREAM_SYNC_0_2_10.md) · [上游更新评估](docs/UPSTREAM_UPDATE_REVIEW.md)。尚未生成或安装新版APK。
+当前分支为 **0.2.10部分更新候选源码**，从DiPlay 0.2.9/test31开始，已移植歌曲元数据与封面、通话音效及电池协议更新；完整test31保留在main分支。[迁移内容及核验](docs/UPSTREAM_SYNC_0_2_10.md) · [上游更新评估](docs/UPSTREAM_UPDATE_REVIEW.md)。已在本机制作test32安装包，未安装车机；APK和认证资产未上传公开仓库。
 
 主要改动：
 
@@ -22,7 +22,7 @@
 ./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :mobile:lintDebug :mobile:assembleDebug
 ```
 
-普通源码构建不包含CarPlay认证身份。需要独立运行时，通过本机环境变量`DIPLAY_AUTH_ASSETS_DIR`明确选择外部身份文件；不得把这些文件或Android签名密钥提交进Git。调试版本沿用本车安装ID `com.shihab.diplay.tang21test`、版本代码59，更新现有安装还需要原来的签名。[构建说明](docs/BUILD.md)。
+普通源码构建不包含CarPlay认证身份。需要独立运行时，通过本机环境变量`DIPLAY_AUTH_ASSETS_DIR`明确选择外部身份文件；不得把这些文件或Android签名密钥提交进Git。调试版本沿用本车安装ID `com.shihab.diplay.tang21test`、版本代码60，更新现有安装还需要原来的签名。[构建说明](docs/BUILD.md)。
 
 ## 说明
 

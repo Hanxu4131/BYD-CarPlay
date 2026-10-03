@@ -40,7 +40,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".tang21test"
-            versionNameSuffix = "-tang21-test31"
+            versionNameSuffix = "-tang21-test32"
         }
         release {
             optimization {
@@ -60,7 +60,7 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(59) }
+        variant.outputs.forEach { output -> output.versionCode.set(60) }
     }
 }
 
