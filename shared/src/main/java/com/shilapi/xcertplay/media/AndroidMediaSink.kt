@@ -167,6 +167,15 @@ class AndroidMediaSink(
     }
 
     private val appContext = context?.applicationContext
+    private val audioManager = appContext?.getSystemService(AudioManager::class.java)
+    private val communicationAudioMode = audioManager?.let { manager ->
+        CommunicationAudioMode<MicrophoneUplink>(
+            communicationMode = AudioManager.MODE_IN_COMMUNICATION,
+            readMode = { manager.mode },
+            writeMode = { manager.mode = it },
+            onFailure = { Log.w("xcertplay-usb", "could not change call audio mode", it) },
+        )
+    }
     private val audioFocusCoordinator = AudioFocusCoordinator(
         appContext,
         audioFocusEnabled,
@@ -347,12 +356,40 @@ class AndroidMediaSink(
     }
 
     override fun onMicrophoneStarted(id: AudioStreamId, config: MicrophoneConfig) {
-        val uplink = microphoneUplinks.computeIfAbsent(id) { MicrophoneUplink(config) }
-        if (!uplink.start()) microphoneUplinks.remove(id, uplink)
+        var uplink: MicrophoneUplink? = null
+        try {
+            uplink = microphoneUplinks.computeIfAbsent(id) {
+                lateinit var created: MicrophoneUplink
+                created = MicrophoneUplink(config, onClosed = {
+                    if (config.audioType == "telephony") communicationAudioMode?.release(created)
+                })
+                created
+            }
+            if (config.audioType == "telephony") communicationAudioMode?.acquire(uplink)
+            if (!uplink.start()) {
+                microphoneUplinks.remove(id, uplink)
+                communicationAudioMode?.release(uplink)
+            }
+        } catch (error: Exception) {
+            Log.e("xcertplay-usb", "microphone start failed", error)
+            if (uplink != null) {
+                microphoneUplinks.remove(id, uplink)
+                try {
+                    uplink.close()
+                } finally {
+                    communicationAudioMode?.release(uplink)
+                }
+            }
+        }
     }
 
     override fun onMicrophoneStopped(id: AudioStreamId) {
-        microphoneUplinks.remove(id)?.close()
+        val uplink = microphoneUplinks.remove(id) ?: return
+        try {
+            uplink.close()
+        } finally {
+            communicationAudioMode?.release(uplink)
+        }
     }
 
     fun close() {
@@ -379,8 +416,12 @@ class AndroidMediaSink(
         audioRenderers.clear()
         val hadMedia = synchronized(mediaAudioTypes) { mediaAudioTypes.isNotEmpty().also { mediaAudioTypes.clear() } }
         if (hadMedia) onMediaAudioChanged(false)
-        microphoneUplinks.values.forEach(MicrophoneUplink::close)
-        microphoneUplinks.clear()
+        try {
+            microphoneUplinks.values.forEach(MicrophoneUplink::close)
+        } finally {
+            microphoneUplinks.clear()
+            communicationAudioMode?.close()
+        }
     }
 
     private fun videoDecoder(type: Int): VideoDecoder =

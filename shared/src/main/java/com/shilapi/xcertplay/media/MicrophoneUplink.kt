@@ -3,6 +3,9 @@ package com.shilapi.xcertplay.media
 import android.media.AudioFormat as AndroidAudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AudioEffect
+import android.media.audiofx.NoiseSuppressor
 import android.util.Log
 import com.shilapi.xcertplay.airplay.AudioCodecKind
 import com.shilapi.xcertplay.airplay.MicrophoneConfig
@@ -22,12 +25,22 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The recorder runs only while the matching audio stream is active, so callers start this after
  * the first downlink audio packet and close it on stream teardown.
  */
-internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeable {
+internal class MicrophoneUplink(
+    private val config: MicrophoneConfig,
+    private val onClosed: () -> Unit = {},
+) : Closeable {
     private val running = AtomicBoolean(false)
     private val firstPacketLogged = AtomicBoolean(false)
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var socket: DatagramSocket? = null
     @Volatile private var opusEncoder: OpusEncoder? = null
+    private val effects = VoiceEffects<AudioEffect>(
+        enable = { it.setEnabled(true) == AudioEffect.SUCCESS && it.enabled },
+        release = { it.release() },
+        report = { message, error ->
+            if (error == null) Log.i(TAG, message) else Log.w(TAG, message, error)
+        },
+    )
     private var thread: Thread? = null
 
     fun start(): Boolean {
@@ -108,6 +121,14 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
         socket = nextSocket
         opusEncoder = nextEncoder
         return try {
+            if (config.audioType == "telephony") {
+                effects.add("AEC") {
+                    if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(nextRecorder.audioSessionId) else null
+                }
+                effects.add("NS") {
+                    if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(nextRecorder.audioSessionId) else null
+                }
+            }
             nextRecorder.startRecording()
             thread = Thread({ capture(nextRecorder, nextSocket) }, "carplay-mic").apply {
                 isDaemon = true
@@ -235,6 +256,7 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
     @Synchronized
     private fun release() {
         running.set(false)
+        effects.close()
         val currentRecorder = recorder
         recorder = null
         try {
@@ -251,7 +273,11 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
         }
         val currentEncoder = opusEncoder
         opusEncoder = null
-        currentEncoder?.close()
+        try {
+            currentEncoder?.close()
+        } finally {
+            onClosed()
+        }
     }
 
     private companion object {

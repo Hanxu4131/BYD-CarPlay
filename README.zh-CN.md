@@ -2,7 +2,7 @@
 
 寒叙（[@Hanxu4131](https://github.com/Hanxu4131)）基于 [DiPlay](https://github.com/shihabal3amri/DiPlay) 做的个人二次开发版，主要适配2023款唐 DM-i、21平台／控制器。
 
-当前保存已在本车使用的 **test31** 源码，基于 DiPlay 0.2.9。它还没有合入上游0.2.10；近期更新的评估见 [上游更新对比](docs/UPSTREAM_UPDATE_REVIEW.md)。
+当前分支为 **0.2.10部分更新候选源码**，从DiPlay 0.2.9/test31开始，已移植歌曲元数据与封面、通话音效及电池协议更新；完整test31保留在main分支。[迁移内容及核验](docs/UPSTREAM_SYNC_0_2_10.md) · [上游更新评估](docs/UPSTREAM_UPDATE_REVIEW.md)。尚未生成或安装新版APK。
 
 主要改动：
 
