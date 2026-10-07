@@ -29,10 +29,14 @@ internal object MapMirrors {
     /** Set by the CarPlay screen: applies one mirror to its current media sink. */
     var sink: ((String, Surface?) -> Unit)? = null
 
-    /** The CarPlay screen has a new media sink: give it every mirror. */
-    fun reapply() {
+    /** Preserve readiness only when a host adopts the same live renderer; new sinks reset it. */
+    fun reapply(preserveReadiness: Boolean = false) {
         val apply = sink ?: return
         surfaces.forEach { (key, surface) ->
+            val retained = preserveReadiness && surface.isValid &&
+                (readySurfaces[key] === surface || presentedSurfaces[key] === surface)
+            // Reapplying the same surface would close its existing mirror decoder.
+            if (retained) return@forEach
             resetReadiness(key, surface)
             apply(key, surface)
         }

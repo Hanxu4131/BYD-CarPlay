@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">BYD Carplay</string>
+    <string name="navigation_volume_wheel_help">在系统无障碍中开启 BYD Carplay 导航滚轮服务。导航播报期间，音量滚轮只调整导航声道14；播报结束后恢复原来的音量控制。</string>
+</resources>

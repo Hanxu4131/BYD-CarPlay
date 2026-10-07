@@ -22,6 +22,8 @@ class AdaptiveResizeTransitionTest {
         state.confirm(1,10,0,surface)
         assertFalse(state.presented(1,surface))
         assertFalse(state.expire(old))
+        assertFalse(state.isCurrent(old))
+        assertTrue(state.isCurrent(next))
         assertTrue(state.active)
         assertTrue(state.expire(next))
         assertFalse(state.active)
@@ -30,7 +32,9 @@ class AdaptiveResizeTransitionTest {
         val state = AdaptiveResizeTransition()
         val token = state.begin(1)
         assertEquals(token,state.begin(1))
+        assertTrue(state.isCurrent(token))
         state.cancel()
+        assertFalse(state.isCurrent(token))
         assertFalse(state.expire(token))
         assertFalse(state.presented(999,Any()))
     }

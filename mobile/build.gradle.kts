@@ -17,8 +17,8 @@ android {
         applicationId = "com.shihab.diplay"
         minSdk = 28
         targetSdk = 37
-        versionCode = 28
-        versionName = "0.2.9"
+        versionCode = 92
+        versionName = "1.0.0"
 
     }
 
@@ -40,7 +40,7 @@ android {
     buildTypes {
         debug {
             applicationIdSuffix = ".tang21test"
-            versionNameSuffix = "-tang21-test31"
+            versionNameSuffix = ""
         }
         release {
             optimization {
@@ -60,7 +60,7 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(59) }
+        variant.outputs.forEach { output -> output.versionCode.set(92) }
     }
 }
 

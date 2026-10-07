@@ -86,6 +86,7 @@ class AirPlaySession(
     private var eventCipher: ControlCipher? = null
     private var eventCseq = 0
     private val pendingAppearance = PendingAppearance()
+    private val appearanceResponses = AppearanceResponseDiagnostics()
     private val firstTouchSendLogged = AtomicBoolean(false)
     private val touchSendFailureLogged = AtomicBoolean(false)
     private val ntp = NtpClock()
@@ -121,9 +122,13 @@ class AirPlaySession(
         }
     }
 
-    override fun close() {
+    override fun close() = close("caller requested")
+
+    internal fun close(reason: String) {
         if (!closed.compareAndSet(false, true)) return
+        debugLog("airplay session closing source=$reason thread=${Thread.currentThread().name}")
         pendingAppearance.clear()
+        appearanceResponses.clear()
         safeClose(socket)
         try {
             media.onSessionClosed(this)
@@ -149,9 +154,7 @@ class AirPlaySession(
 
     fun requestMainViewArea(index: Int): Boolean = synchronized(eventWriteLock) {
         if (closed.get() || config.hevc || index !in config.main.adaptiveViewAreas.indices) return@synchronized false
-        sendCommandLocked(mapOf("type" to "updateViewArea", "params" to mapOf(
-            "uuid" to AirPlayInfoPlist.MAIN_UUID, "animationDurationMillis" to 200,
-            "viewAreaIndex" to index, "adjacentViewAreas" to emptyList<Int>())), closeOnFailure = false)
+        sendCommandLocked(MainViewAreaCommand.build(index, config.main.adaptiveViewAreas.size), closeOnFailure = false)
     }
 
     fun sendCommand(command: Map<String, Any?>): Boolean = synchronized(eventWriteLock) {
@@ -180,13 +183,17 @@ class AirPlaySession(
     private fun sendCommandLocked(command: Map<String, Any?>, extraHeaders: String = "", closeOnFailure: Boolean = true): Boolean {
         val socket = eventSocket ?: return false
         val cipher = eventCipher ?: return false
-        eventCseq++
+        val commandCseq = ++eventCseq
         val body = BplistCodec.encode(command)
         val head = "POST /command RTSP/1.0\r\n" + extraHeaders +
             "Content-Type: $PLIST_CONTENT_TYPE\r\n" +
             "Content-Length: ${body.size}\r\n" +
-            "CSeq: $eventCseq\r\n\r\n"
+            "CSeq: $commandCseq\r\n\r\n"
         trace("airplay event tx command ${CarPlayNegotiationSummary.command(string(command["type"]), asMap(command["params"]))} bodyBytes=${body.size}")
+        appearanceResponses.transmission(commandCseq, command)?.let {
+            debugLog(it, uiVisible = false)
+            trace(it)
+        }
         return try {
             val bytes = cipher.encrypt(head.toByteArray(Charsets.US_ASCII) + body)
             val output = socket.getOutputStream()
@@ -194,6 +201,7 @@ class AirPlaySession(
             output.flush()
             true
         } catch (error: Exception) {
+            appearanceResponses.forget(commandCseq)
             Log.w(TAG, "airplay event command failed type=${command["type"]}", error)
             if (closeOnFailure) close()
             false
@@ -374,7 +382,7 @@ class AirPlaySession(
             if (!closed.get()) Log.e(TAG, "airplay $closeReason", error)
         } finally {
             debugLog("airplay control closing reason=$closeReason activeStreams=$activeStreams")
-            close()
+            close("control loop")
         }
     }
 
@@ -576,11 +584,21 @@ class AirPlaySession(
 
     private fun handleTeardown(request: RtspMessage.Request): RtspMessage.Response {
         val decodedBody = try {
-            BplistCodec.decode(request.body)
+            if (request.body.isEmpty()) null else BplistCodec.decode(request.body)
         } catch (_: Exception) {
-            null
+            debugLog("airplay TEARDOWN rejected reason=invalid plist bodyBytes=${request.body.size}")
+            return RtspMessage.Response(status = 400)
         }
-        val types = teardownStreamTypes(decodedBody)
+        if (request.body.isNotEmpty() && decodedBody == null) {
+            debugLog("airplay TEARDOWN rejected reason=null plist bodyBytes=${request.body.size}")
+            return RtspMessage.Response(status = 400)
+        }
+        val types = try {
+            teardownStreamTypes(decodedBody)
+        } catch (_: IllegalArgumentException) {
+            debugLog("airplay TEARDOWN rejected reason=invalid streams bodyBytes=${request.body.size}")
+            return RtspMessage.Response(status = 400)
+        }
 
         debugLog(
             "airplay TEARDOWN requestedTypes=${types?.size ?: "all"} activeBefore=${activeStreams.size} " +
@@ -659,7 +677,7 @@ class AirPlaySession(
             if (shared == null) {
                 Log.e(TAG, "airplay event rejected: pair-verify shared secret unavailable")
                 safeClose(socket)
-                close()
+                close("event accept: shared secret unavailable")
                 return
             }
             val writeKey = AirPlayCrypto.hkdfSha512(
@@ -682,26 +700,30 @@ class AirPlaySession(
         } catch (error: Exception) {
             if (!closed.get()) {
                 Log.e(TAG, "airplay event accept failed", error)
-                close()
+                close("event accept failed ${error.javaClass.simpleName}")
             }
         }
     }
 
     private fun runEventRead(socket: Socket) {
+        var reason = "session closed"
         try {
             val input = BufferedInputStream(socket.getInputStream())
             val output = BufferedOutputStream(socket.getOutputStream())
+            val eventReads = EventReadDiagnostics()
             var encrypted = ByteArray(0)
             var plaintext = ByteArray(0)
             val buffer = ByteArray(READ_CHUNK_BYTES)
             while (!closed.get()) {
                 val count = input.read(buffer)
-                if (count < 0) break
-                val cipher = eventCipher ?: break
+                if (count < 0) { reason = "peer EOF"; break }
+                val cipher = eventCipher
+                if (cipher == null) { reason = "cipher unavailable"; break }
                 encrypted += buffer.copyOf(count)
                 val decrypted = try {
                     cipher.decrypt(encrypted)
                 } catch (error: Exception) {
+                    reason = "decrypt failed ${error.javaClass.simpleName}"
                     Log.e(TAG, "airplay event decrypt failed encrypted=${encrypted.size}", error)
                     break
                 }
@@ -709,8 +731,20 @@ class AirPlaySession(
                 plaintext += decrypted.data
                 val parsed = RtspMessage.parseMessages(plaintext)
                 plaintext = parsed.rest
+                eventReads.received(count, decrypted.data.size, parsed.messages.size, encrypted.size, plaintext.size)?.let {
+                    debugLog(it, uiVisible = false)
+                    trace(it)
+                }
                 for (message in parsed.messages) {
-                    if (message.method.startsWith("RTSP/") || message.method.startsWith("HTTP/")) continue
+                    if (message.method.startsWith("RTSP/") || message.method.startsWith("HTTP/")) {
+                        val report = appearanceResponses.response(message)
+                            ?: appearanceResponses.unmatchedResponse(message)
+                        if (report != null) {
+                            debugLog(report, uiVisible = false)
+                            trace(report)
+                        }
+                        continue
+                    }
                     debugLog(
                         "airplay event rx ${message.method} ${message.path} cseq=${message.headers["cseq"] ?: "-"} body=${message.body.size}",
                     )
@@ -729,13 +763,14 @@ class AirPlaySession(
                 }
             }
         } catch (error: Exception) {
+            reason = "I/O failed ${error.javaClass.simpleName}"
             if (!closed.get()) Log.e(TAG, "airplay event read failed", error)
         } finally {
-            debugLog("airplay event connection closed")
+            debugLog("airplay event connection closed reason=$reason sessionClosed=${closed.get()}")
             if (eventSocket === socket) eventSocket = null
             eventCipher = null
             safeClose(socket)
-            if (!closed.get()) close()
+            if (!closed.get()) close("event read: $reason")
         }
     }
 
@@ -781,9 +816,13 @@ internal fun setupEnabledFeatures(config: AirPlayConfig, proposed: List<*>?): Li
  * down one of the latter must not close the iAP tunnel.
  */
 internal fun teardownStreamTypes(body: Any?): List<Int>? {
-    val entries = ((body as? Map<*, *>)?.get("streams") as? List<*>).orEmpty().mapNotNull { entry ->
-        val stream = entry as? Map<*, *> ?: return@mapNotNull null
-        val type = (stream["type"] as? Number)?.toInt() ?: return@mapNotNull null
+    if (body == null) return null
+    val dict = body as? Map<*, *> ?: throw IllegalArgumentException("TEARDOWN body must be a dictionary")
+    if (!dict.containsKey("streams")) return null
+    val streams = dict["streams"] as? List<*> ?: throw IllegalArgumentException("TEARDOWN streams must be a list")
+    val entries = streams.map { entry ->
+        val stream = entry as? Map<*, *> ?: throw IllegalArgumentException("Invalid TEARDOWN stream")
+        val type = (stream["type"] as? Number)?.toInt() ?: throw IllegalArgumentException("Missing TEARDOWN stream type")
         type to (stream["streamID"] as? Number)?.toLong()
     }
     if (entries.isEmpty()) return null

@@ -9,6 +9,9 @@ import android.util.Log
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+        if (CameraServices.ENABLED && com.shilapi.xcertplay.camera.CameraSettings.isEnabled(context)) {
+            CameraSessionService.update(context, true)
+        }
         if (!AirPlayPersistence.loadAutoStartOnBoot(context)) return
 
         val launch = Intent(context, DiPlayActivity::class.java).apply {

@@ -12,6 +12,104 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29], manifest = Config.NONE)
 class CarPlayAudioStreamIsolationTest {
+    @Test fun malformedTeardownReturns400AndPreservesActiveStreams() {
+        val session = session()
+        session.activeStreams.addAll(listOf(110, 111, 102))
+        val handler = AirPlaySession::class.java.getDeclaredMethod("handleTeardown", RtspMessage.Request::class.java)
+            .apply { isAccessible = true }
+        try {
+            listOf(
+                byteArrayOf(1, 2, 3),
+                BplistCodec.encode(mapOf("streams" to listOf(mapOf("streamID" to 7L)))),
+            ).forEach { body ->
+                val response = handler.invoke(session, RtspMessage.Request("TEARDOWN", "/", "RTSP/1.0", emptyMap(), body))
+                    as RtspMessage.Response
+                assertEquals(400, response.status)
+                assertEquals(setOf(110, 111, 102), session.activeStreams)
+            }
+        } finally {
+            session.close()
+        }
+    }
+
+    @Test fun replacedScreenEofCannotCloseTheCurrentSession() {
+        val session = session()
+        val engine = CarPlayMediaEngine(object : MediaSink {})
+        val old = ScreenStream(ByteArray(32))
+        val current = ScreenStream(ByteArray(32))
+        val key = CarPlayMediaEngine.StreamKey(session, 110)
+        streams(engine)[key] = current
+        try {
+            engine.screenClosed(session, 110, old, false, null)
+            assertSame(current, streams(engine)[key])
+            val closed = AirPlaySession::class.java.getDeclaredField("closed").apply { isAccessible = true }
+                .get(session) as java.util.concurrent.atomic.AtomicBoolean
+            assertFalse(closed.get())
+            engine.screenClosed(session, 110, current, false, null)
+            assertTrue(closed.get())
+        } finally {
+            old.close()
+            engine.onSessionClosed(session)
+            session.close()
+        }
+    }
+
+    @Test fun sessionCloseStopsItsAudioAndPreservesOtherSessionFeedback() {
+        val stopped = mutableListOf<AudioStreamId>()
+        val microphonesStopped = mutableListOf<AudioStreamId>()
+        val engine = CarPlayMediaEngine(object : MediaSink {
+            override fun onAudioStopped(id: AudioStreamId) { stopped += id }
+            override fun onMicrophoneStopped(id: AudioStreamId) { microphonesStopped += id }
+        })
+        val first = session()
+        val second = session()
+        try {
+            assertNotNull(engine.onAudio(first, 100, setup("telephony")))
+            assertNotNull(engine.onAudio(second, 102, setup("media")))
+            @Suppress("UNCHECKED_CAST")
+            val microphones = CarPlayMediaEngine::class.java.getDeclaredField("pendingMicrophone").apply { isAccessible = true }
+                .get(engine) as MutableMap<CarPlayMediaEngine.StreamKey, MicrophoneConfig>
+            microphones[CarPlayMediaEngine.StreamKey(first, 100, "telephony")] = MicrophoneConfig(
+                "telephony", 48000, 1, 100, 20, java.net.InetAddress.getLoopbackAddress(), 1, ByteArray(32),
+            )
+            val firstFeedback = engine.onFeedback(first)?.get("streams") as List<*>
+            assertEquals(1, firstFeedback.size)
+            stopped.clear()
+            engine.onSessionClosed(first)
+            assertEquals(listOf(AudioStreamId(100, "telephony")), stopped)
+            assertEquals(listOf(AudioStreamId(100, "telephony")), microphonesStopped)
+            assertEquals(setOf(CarPlayMediaEngine.StreamKey(second, 102, "media")), streams(engine).keys)
+            val feedback = engine.onFeedback(second)?.get("streams") as List<*>
+            assertEquals(1, feedback.size)
+        } finally {
+            engine.onSessionClosed(first)
+            engine.onSessionClosed(second)
+            first.close()
+            second.close()
+        }
+    }
+
+    @Test fun lateSessionCloseDoesNotStopReplacementWithTheSameAudioIdentity() {
+        val stopped = mutableListOf<AudioStreamId>()
+        val engine = CarPlayMediaEngine(object : MediaSink {
+            override fun onAudioStopped(id: AudioStreamId) { stopped += id }
+        })
+        val old = session(); val replacement = session()
+        try {
+            assertNotNull(engine.onAudio(old, 100, setup("telephony")))
+            assertNotNull(engine.onAudio(replacement, 100, setup("telephony")))
+            stopped.clear()
+            engine.onSessionClosed(old)
+            assertTrue(stopped.isEmpty())
+            assertEquals(setOf(CarPlayMediaEngine.StreamKey(replacement, 100, "telephony")), streams(engine).keys)
+            engine.onSessionClosed(replacement)
+            assertEquals(listOf(AudioStreamId(100, "telephony")), stopped)
+        } finally {
+            engine.onSessionClosed(old); engine.onSessionClosed(replacement)
+            old.close(); replacement.close()
+        }
+    }
+
     @Test fun guidanceSetupAndMediaReplacementKeepTheOtherAudioStreamAlive() {
         val session = session()
         val engine = CarPlayMediaEngine(object : MediaSink {})

@@ -1,0 +1,3 @@
+<resources>
+    <string name="navigation_volume_wheel_help">Enable BYD Carplay navigation wheel filtering in Accessibility settings. During navigation guidance, supported volume keys change navigation channel 14 only; outside guidance they retain their normal behavior.</string>
+</resources>

@@ -327,6 +327,49 @@ class CarPlayHostDisplaySizeTest {
         } finally { renderer.close() }
     }
 
+    @Test fun firstUpgradedSplitHandshakeIsRememberedForFullscreenReconnect() {
+        // This fixture deliberately skips onCreate and its transport setup.
+        setField("airPlayIdentity", AirPlayIdentity.generate())
+        AdaptiveDisplayPreferences.setEnabled(activity, true)
+        setField("hevcEnabled", false)
+        setField("maximumDetectedWidthPixels", 1920)
+        setField("maximumDetectedHeightPixels", 1080)
+        val create = activity.javaClass.getDeclaredMethod("createAirPlayConfig", sizeClass).apply { isAccessible = true }
+        val splitConfig = (create.invoke(activity, size(1284, 990)) as AirPlayConfig).main
+        assertEquals(1, splitConfig.initialViewArea)
+        val fullConfig = (create.invoke(activity, size(1920, 1080)) as AirPlayConfig).main
+        assertEquals(0, fullConfig.initialViewArea)
+        assertEquals(splitConfig.adaptiveViewAreas, fullConfig.adaptiveViewAreas)
+        assertEquals(listOf(MainViewArea(1920, 1080), MainViewArea(1284, 990)), fullConfig.adaptiveViewAreas)
+    }
+
+    @Test fun stableObservedSplitIsSavedButTransientResizeIsNot() {
+        AdaptiveDisplayPreferences.setEnabled(activity, true)
+        setField("hevcEnabled", false)
+        setField("maximumDetectedWidthPixels", 1920)
+        setField("maximumDetectedHeightPixels", 1080)
+        startSession()
+        val canvas = AdaptiveViewAreaHistory.Size(1920, 1080)
+        applySize(1200, 990)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(500))
+        applySize(1284, 990)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1000))
+        assertEquals(listOf(AdaptiveViewAreaHistory.Size(1284, 990)), AdaptiveDisplayPreferences.splitAreas(activity, canvas))
+        assertTrue(AdaptiveDisplayPreferences.splitAreas(activity, AdaptiveViewAreaHistory.Size(1080, 1920)).isEmpty())
+    }
+
+    @Test fun unchangedCurrentWindowIsRecordedAfterUpgrade() {
+        AdaptiveDisplayPreferences.setEnabled(activity, true)
+        setField("hevcEnabled", false)
+        setField("maximumDetectedWidthPixels", 1920)
+        setField("maximumDetectedHeightPixels", 1080)
+        setField("activeDisplaySize", size(1284, 990))
+        scheduleSize(1284, 990)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(1000))
+        assertEquals(listOf(AdaptiveViewAreaHistory.Size(1284, 990)),
+            AdaptiveDisplayPreferences.splitAreas(activity, AdaptiveViewAreaHistory.Size(1920, 1080)))
+    }
+
     private fun startSession(
         rotation: Int = Surface.ROTATION_0,
         windowWidth: Int = 1920,

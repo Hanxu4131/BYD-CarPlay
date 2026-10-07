@@ -23,6 +23,7 @@ internal class AdaptiveResizeTransition {
         if (surface !== geometrySurface || serial <= ready) return false
         cancel(); return true
     }
+    fun isCurrent(token: Long): Boolean = active && token == generation
     fun expire(token: Long): Boolean {
         if (!active || token != generation) return false
         cancel(); return true

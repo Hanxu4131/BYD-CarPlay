@@ -35,6 +35,7 @@ internal class ClusterStartupView(
     context: Context,
     private val minimumShowMs: Long = 1_500L,
     private val fixedAspectRatio: Float? = null,
+    private val maximumWaitMs: Long = 5_000L,
 ) : View(context) {
     private val ultraLogo = requireNotNull(context.getDrawable(R.drawable.cluster_carplay_ultra_logo_vector))
     private val standardLogo = requireNotNull(context.getDrawable(R.drawable.cluster_carplay_logo_vector))
@@ -59,6 +60,7 @@ internal class ClusterStartupView(
     private var glass: LinearGradient? = null
     private val panelBounds = RectF()
     private var waiting = false
+    val waitingForFrame: Boolean get() = waiting
     private var waitStartedAt = 0L
     private var firstFrameWaitMs: Long? = null
     private var pulse: ValueAnimator? = null
@@ -85,7 +87,7 @@ internal class ClusterStartupView(
         alpha = 1f
         visibility = VISIBLE
         startPulse()
-        main.postDelayed(timeout, 5_000L)
+        main.postDelayed(timeout, maximumWaitMs)
     }
 
     fun revealMap(reason: String = "first_frame") {
@@ -211,11 +213,6 @@ internal class ClusterStartupView(
         paint.alpha = 255
         logo.setBounds(x.toInt(), y.toInt(), (x + logoWidth).toInt(), (y + logoHeight).toInt())
         logo.draw(canvas)
-        paint.shader = null
-        paint.color = Color.WHITE
-        paint.typeface = android.graphics.Typeface.DEFAULT_BOLD
-        paint.textSize = logoHeight * .48f
-        canvas.drawText("BYD CarPlay", x + logoHeight * 1.14f, y + logoHeight * .66f, paint)
         paint.alpha = 255
         shaderMatrix.setTranslate(x - width * .21f + phase * (logoWidth + width * .21f), 0f)
         sheen?.setLocalMatrix(shaderMatrix)

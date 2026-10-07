@@ -48,6 +48,7 @@ object AirPlayInfoPlist {
             info["audioLatencies"] = audioLatencies()
             info["audioFormats"] = audioFormats(config.entertainmentSampleRate, config.microphone)
         }
+        config.nightMode?.let { info["nightMode"] = it }
         info["extendedFeatures"] = listOf("vocoderInfo", "enhancedRequestCarUI")
         info["displays"] = displays
         info["hidDevices"] = listOf(
@@ -170,6 +171,11 @@ object AirPlayInfoPlist {
             "heightPhysical" to heightPhysical,
             "features" to (display.features ?: (DISPLAY_FEATURE_HIGH_FIDELITY_TOUCH or DISPLAY_FEATURE_KNOBS)),
             "primaryInputDevice" to display.primaryInputDevice,
+            // Declare the initial automatic UI/map appearance before runtime commands.
+            "uiAppearanceMode" to 0,
+            "uiAppearanceSetting" to 0,
+            "mapAppearanceMode" to 0,
+            "mapAppearanceSetting" to 0,
         )
 
         if (type == 110 && display.separateCornerMasks) entry["cornerMasks"] = true

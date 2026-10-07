@@ -126,7 +126,7 @@
     <string name="carplay_control_running">CarPlay control running</string>
     <string name="carplay_control_window_ended">CarPlay control window ended</string>
     <string name="carplay_icon">CarPlay icon</string>
-    <string name="carplay_map_on_instrument_cluster_experimental">CarPlay map on dashboard · experimental</string>
+    <string name="carplay_map_on_instrument_cluster_experimental">CarPlay map on dashboard</string>
     <string name="carplay_service_already_running">CarPlay service already running</string>
     <string name="carplay_session_already_running">CarPlay session already running</string>
     <string name="carplay_session_ended_reconnecting">CarPlay session ended; reconnecting</string>
@@ -476,8 +476,8 @@
     <string name="center_map_no_permission_screen">This head unit has no settings screen for this permission. Allow it over ADB.</string>
     <string name="launcher_map_sharing">Share the live map with other launchers</string>
     <string name="launcher_map_sharing_description">Launchers that support BYD Carplay can show the live dashboard map inside their own home screen. Off by default, because any app on the head unit could then ask for the map. See docs/LAUNCHER_INTEGRATION.md.</string>
-    <string name="navigation_volume_wheel">Navigation volume wheel (experimental)</string>
-    <string name="navigation_volume_wheel_help">During speech on navigation channel 14, ask the volume wheel to adjust navigation. Restore the default after speech. Support depends on the head unit.</string>
+    <string name="navigation_volume_wheel">Separate navigation volume wheel</string>
+    <string name="navigation_volume_wheel_help">On: adjust navigation during guidance, media otherwise. Off: always adjust media. The service recovers automatically; calls and voice assistants keep their normal controls.</string>
     <string name="restart">Restart</string>
     <string name="restarting_carplay">Restarting CarPlay</string>
     <string name="cluster_song_legacy">Show in the factory song display</string>
@@ -499,4 +499,7 @@
     <string name="startup_artwork_description">Shared by the centre screen and instrument cluster; only changes the loading screen</string>
     <string name="cluster_song_artist">Show artist in the factory song display</string>
     <string name="cluster_song_artist_description">Append the artist to the lyrics or title. Dudu can still read the full artist information when this is off.</string>
+    <string name="navigation_wheel_service_name">BYD Carplay navigation wheel</string>
+    <string name="navigation_wheel_service_settings">Enable navigation wheel service</string>
+    <string name="navigation_wheel_service_description">Handles volume keys during navigation guidance; does not read screen content.</string>
 </resources>

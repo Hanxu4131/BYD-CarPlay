@@ -119,7 +119,7 @@
     <string name="carplay_control_running">CarPlay 控制通道运行中</string>
     <string name="carplay_control_window_ended">CarPlay 控制会话已结束</string>
     <string name="carplay_icon">CarPlay 图标</string>
-    <string name="carplay_map_on_instrument_cluster_experimental">仪表盘上的CarPlay地图 · 实验性</string>
+    <string name="carplay_map_on_instrument_cluster_experimental">仪表盘上的CarPlay地图</string>
     <string name="carplay_service_already_running">CarPlay 服务已在运行</string>
     <string name="carplay_session_already_running">CarPlay 会话已在运行</string>
     <string name="carplay_session_ended_reconnecting">CarPlay 会话已结束；正在重新连接</string>
@@ -476,8 +476,8 @@
     <string name="center_map_no_permission_screen">此车机没有该权限的设置界面，请通过 ADB 允许。</string>
     <string name="launcher_map_sharing">与其他启动器共享实时地图</string>
     <string name="launcher_map_sharing_description">支持 BYD Carplay 的启动器可以在自己的主屏幕中显示实时仪表盘地图。默认关闭，因为开启后车机上的任何应用都可以请求该地图。详见 docs/LAUNCHER_INTEGRATION.md。</string>
-    <string name="navigation_volume_wheel">导航播报时调节导航音量（实验）</string>
-    <string name="navigation_volume_wheel_help">导航通道14正在播报时，让音量滚轮调节导航音量；播报结束恢复默认。是否生效取决于车机。</string>
+    <string name="navigation_volume_wheel">导航播报时滚轮单独调节</string>
+    <string name="navigation_volume_wheel_help">开启：导航播报时只调导航，平时调媒体。关闭：始终调媒体。服务失效会自动恢复，无需手动修复；通话和语音助手保留原有控制。</string>
     <string name="restart">重启</string>
     <string name="restarting_carplay">正在重启 CarPlay</string>
     <string name="cluster_song_legacy">原车歌曲栏显示</string>
@@ -499,4 +499,7 @@
     <string name="startup_artwork_description">中控与仪表共用，仅改变加载画面</string>
     <string name="cluster_song_artist">原车歌曲栏显示歌手</string>
     <string name="cluster_song_artist_description">在歌词／歌曲名后附加歌手。关闭后，嘟嘟仍可读取完整歌手信息。</string>
+    <string name="navigation_wheel_service_name">BYD Carplay 导航滚轮</string>
+    <string name="navigation_wheel_service_settings">开启导航滚轮服务</string>
+    <string name="navigation_wheel_service_description">仅处理导航播报期间的音量按键，不读取屏幕内容。</string>
 </resources>

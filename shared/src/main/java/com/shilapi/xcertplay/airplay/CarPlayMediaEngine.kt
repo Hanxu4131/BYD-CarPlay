@@ -112,14 +112,7 @@ class CarPlayMediaEngine(
                 override fun onConfig(codecData: ByteArray) { if (current()) sink.onVideoConfig(type, codecData) }
                 override fun onFrame(naluBytes: ByteArray) { if (current()) sink.onVideoFrame(type, naluBytes) }
                 override fun onClosed(cause: Throwable?) {
-                    Log.w(
-                        TAG,
-                        "screen stream ended type=$type reason=${cause?.message ?: "peer EOF"}",
-                    )
-                    if (streams.remove(streamKey, screen) && (!adaptive || adaptiveScreens.remove(type, screen))) {
-                        sink.onScreenStreamActive(type, false)
-                    }
-                    session.close()
+                    screenClosed(session, type, screen, adaptive, cause)
                 }
             },
         )
@@ -242,7 +235,7 @@ class CarPlayMediaEngine(
                                 TAG,
                                 "iAP tunnel ended reason=${cause?.message ?: "peer EOF"}",
                             )
-                            session.close()
+                            session.close("iAP tunnel ended")
                         }
                     },
                 )
@@ -296,12 +289,12 @@ class CarPlayMediaEngine(
         if (!attached) {
             Log.w(TAG, "iAP tunnel relay attachment was rejected after SETUP")
             pending.bridge.close()
-            session.close()
+            session.close("iAP tunnel attachment rejected")
         }
     }
 
     override fun onFeedback(session: AirPlaySession): Map<String, Any?>? {
-        val active = audioMeta.values.toList()
+        val active = audioMeta.entries.filter { it.key.session === session }.map { it.value }
         if (active.isEmpty()) return null
         val streams = active.map { meta ->
             val entry = linkedMapOf<String, Any?>(
@@ -335,6 +328,7 @@ class CarPlayMediaEngine(
     }
 
     override fun onTeardown(session: AirPlaySession, type: Int) {
+        session.logDebug("Media teardown type=$type reason=RTSP TEARDOWN")
         if (type == STREAM_TYPE_DATA) clearPendingIapTunnel(session)
         // TEARDOWN carries only the stream type; release every audioType variant of it.
         val tornDown = streams.keys.filter { it.session === session && it.type == type }
@@ -344,10 +338,10 @@ class CarPlayMediaEngine(
         }
         tornDown.forEach { key ->
             val streamId = AudioStreamId(key.type, key.audioType)
-            if (pendingMicrophone.remove(key) != null) sink.onMicrophoneStopped(streamId)
+            if (pendingMicrophone.remove(key) != null && !anotherSessionOwns(key)) sink.onMicrophoneStopped(streamId)
             audioMeta.remove(key)
             audioCaptures.remove(key)?.close()
-            sink.onAudioStopped(streamId)
+            if (!anotherSessionOwns(key)) sink.onAudioStopped(streamId)
             streams.remove(key)?.close()
         }
         if (isScreenStreamType(type) && clearAdaptive) sink.onScreenStreamActive(type, false)
@@ -364,11 +358,27 @@ class CarPlayMediaEngine(
                 if (it.type != STREAM_TYPE_MAIN_SCREEN || !sink.adaptiveMainViewportEnabled ||
                     (screen is ScreenStream && adaptiveScreens.remove(it.type, screen))) sink.onScreenStreamActive(it.type, false)
             }
-        sessionStreams.forEach { streams.remove(it)?.close() }
-        audioMeta.clear()
-        pendingMicrophone.clear()
-        audioCaptures.values.forEach(AudioPacketCapture::close)
-        audioCaptures.clear()
+        sessionStreams.forEach { key ->
+            val streamId = AudioStreamId(key.type, key.audioType)
+            if (pendingMicrophone.remove(key) != null && !anotherSessionOwns(key)) sink.onMicrophoneStopped(streamId)
+            audioMeta.remove(key)
+            audioCaptures.remove(key)?.close()
+            if (!isScreenStreamType(key.type) && key.type != STREAM_TYPE_DATA && !anotherSessionOwns(key)) sink.onAudioStopped(streamId)
+            session.logDebug("Media stream closing type=${key.type} reason=session close")
+            streams.remove(key)?.close()
+        }
+    }
+
+    private fun anotherSessionOwns(key: StreamKey): Boolean = streams.keys.any {
+        it.session !== key.session && it.type == key.type && it.audioType == key.audioType
+    }
+
+    internal fun screenClosed(session: AirPlaySession, type: Int, screen: ScreenStream, adaptive: Boolean, cause: Throwable?) {
+        val owned = streams.remove(StreamKey(session, type), screen)
+        session.logDebug("Media screen ended type=$type owned=$owned reason=${cause?.javaClass?.simpleName ?: "peer EOF"}")
+        if (!owned) return
+        if (!adaptive || adaptiveScreens.remove(type, screen)) sink.onScreenStreamActive(type, false)
+        session.close("screen ended type=$type")
     }
 
     private fun replacePendingIapTunnel(session: AirPlaySession, next: PendingIapTunnel) {

@@ -51,6 +51,24 @@ class VideoInCarTest {
     }
 
     @Test
+    fun malformedTeardownStreamsCannotBecomeWholeSessionTeardown() {
+        val invalid = listOf<Any>(
+            listOf("not a dictionary"),
+            mapOf("streams" to "not a list"),
+            mapOf("streams" to listOf(mapOf("streamID" to 7L))),
+            mapOf("streams" to listOf(mapOf("type" to 100L), mapOf("type" to "invalid"))),
+        )
+        invalid.forEach { body ->
+            try {
+                teardownStreamTypes(body)
+                throw AssertionError("Malformed TEARDOWN accepted")
+            } catch (_: IllegalArgumentException) {
+                // Reject the entire request, including mixed valid/invalid stream lists.
+            }
+        }
+    }
+
+    @Test
     fun parsesSafariAndAppleTvItems() {
         val safari = VideoInCar.parseItem(
             mapOf(

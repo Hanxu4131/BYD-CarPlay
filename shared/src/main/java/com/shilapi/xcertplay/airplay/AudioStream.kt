@@ -1,5 +1,7 @@
 package com.shilapi.xcertplay.airplay
 
+import android.os.Process
+
 import java.io.Closeable
 import java.io.IOException
 import java.net.DatagramPacket
@@ -84,6 +86,11 @@ class AudioStream(
     }
 
     private fun runData(socket: DatagramSocket, listener: Listener) {
+        // Receiving and decrypting audio must not wait behind video under load.
+        // This changes scheduling only; the socket and control thread stay as configured.
+        runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
+            .onSuccess { onDiagnostic("audio receiver type=$streamType priority=${Process.getThreadPriority(Process.myTid())}") }
+            .onFailure { onDiagnostic("audio receiver priority unavailable type=$streamType") }
         val stats = StreamReceiveStats("audio type=$streamType", onDiagnostic)
         val buffer = ByteArray(DATAGRAM_BYTES)
         try {

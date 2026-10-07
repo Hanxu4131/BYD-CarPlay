@@ -79,6 +79,7 @@ internal object LegacyClusterMap {
         if (!l1MiniInstalled(window)) return
         val stillWanted = {
             owns(window) && enabled(window) && restoreL1AfterMap(window) && target(window) == 1 &&
+                (!CameraServices.ENABLED || !com.shilapi.xcertplay.camera.CameraSettings.isEnabled(window)) &&
                 window.canRestoreL1AfterStartup()
         }
         if (!stillWanted()) return
@@ -229,6 +230,7 @@ internal object LegacyClusterMap {
         context = null
     }
     fun closeWindow() {
+        CameraInstrumentHost.releaseMap()
         retryPolicy.cancel()
         retryTick?.let(main::removeCallbacks); retryTick = null
         LegacyL1MiniOrder.cancel()
@@ -272,8 +274,11 @@ internal object LegacyClusterMap {
                     enabled(ctx) && MapMirrors.streamActive
                 val confirmed = stillEligible && verified == expected && expected > 0
                 event(window.applicationContext, "verifyResult contextDisplay=$contextDisplay taskId=$task verifiedSystemDisplay=${verified ?: -1} systemVerified=$confirmed stillEligible=$stillEligible")
-                if (!confirmed) saveReport(window.applicationContext,
-                    "只读 AMS 未唯一确认当前 task $task 位于目标 display $expected；拒绝绘制仪表地图。")
+                if (!confirmed) {
+                    if (expected == 1) CameraInstrumentHost.mapLaunchFailed(window.applicationContext)
+                    saveReport(window.applicationContext,
+                        "只读 AMS 未唯一确认当前 task $task 位于目标 display $expected；拒绝绘制仪表地图。")
+                }
                 done(if (confirmed) verified else null)
             }
         }
@@ -375,6 +380,7 @@ internal object LegacyClusterMap {
         token = launchToken
         expectedDisplay = selected
         pending = true
+        if (selected == 1) CameraInstrumentHost.prepareMapWindow()
         worker.execute {
             var launchAccepted = false
             val result = runCatching {
@@ -401,12 +407,16 @@ internal object LegacyClusterMap {
                 saveReport(ctx, if (activity == null) result else "已确认独立窗口位于 display $selected；实车可见、车速保留及车辆投屏保护仍需停车检查。", notify = false)
                 scheduleRetry()
                 if (!launchAccepted) {
-                    if (activity == null) { token = null; expectedDisplay = -1 }
+                    if (activity == null) {
+                        token = null; expectedDisplay = -1
+                        if (selected == 1) CameraInstrumentHost.mapLaunchFailed(ctx)
+                    }
                     return@post
                 }
                 main.postDelayed({
                     if (attempt == generation && activity == null) {
                         token = null
+                        if (selected == 1) CameraInstrumentHost.mapLaunchFailed(ctx)
                         saveReport(ctx, "未收到目标 display $selected 的窗口确认；继续每5秒静默重试。", false)
                     }
                 }, 5_000)

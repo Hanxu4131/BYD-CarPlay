@@ -78,26 +78,18 @@ class ClusterMapActivity : Activity() {
             View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
         val root = FrameLayout(this)
         setContentView(root)
-        if (actualDisplay > 0) {
-            confirmAndAttach(root, launchToken, actualDisplay)
-        } else {
-            root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
-                override fun onViewAttachedToWindow(view: View) {
-                    view.removeOnAttachStateChangeListener(this)
-                    if (isFinishing || isDestroyed) return
-                    val attachedDisplay = view.display?.displayId ?: -1
-                    LegacyClusterMap.lifecycle(this@ClusterMapActivity, "decorAttached contextDisplay=$actualDisplay attachedDisplay=$attachedDisplay taskId=$taskId", actualDisplay)
-                    if (attachedDisplay > 0) confirmAndAttach(root, launchToken, attachedDisplay)
-                    else LegacyClusterMap.verifySystemDisplay(this@ClusterMapActivity, launchToken, actualDisplay) { verified ->
-                        if (!isFinishing && !isDestroyed) {
-                            if (verified != null) confirmAndAttach(root, launchToken, verified)
-                            else finish()
-                        }
-                    }
+        // Context/display IDs can be stale after OEM task migration; AMS is authoritative.
+        val verify = {
+            LegacyClusterMap.verifySystemDisplay(this, launchToken, actualDisplay) { verified ->
+                if (!isFinishing && !isDestroyed) {
+                    if (verified != null) confirmAndAttach(root, launchToken, verified) else finish()
                 }
-                override fun onViewDetachedFromWindow(view: View) = Unit
-            })
+            }
         }
+        if (root.isAttachedToWindow) verify() else root.addOnAttachStateChangeListener(object : View.OnAttachStateChangeListener {
+            override fun onViewAttachedToWindow(view: View) { view.removeOnAttachStateChangeListener(this); verify() }
+            override fun onViewDetachedFromWindow(view: View) = Unit
+        })
     }
 
     private fun confirmAndAttach(root: FrameLayout, launchToken: String?, display: Int) {
@@ -130,6 +122,14 @@ class ClusterMapActivity : Activity() {
             }
         })
         mapRoot = root
+        root.viewTreeObserver.addOnPreDrawListener {
+            val realDisplay = root.display?.displayId ?: -1
+            if (realDisplay > 0 && realDisplay != actualDisplay && !isFinishing) {
+                Log.w("DiPlay-LegacyCluster", "map task migrated display=$realDisplay expected=$actualDisplay; release without reclaim")
+                finish()
+            }
+            true
+        }
         mapView = map
         val startup = ClusterStartupView(this).apply { setUltra(StartupLogoPreferences.ultra(this@ClusterMapActivity)) }
         startupView = startup
@@ -155,6 +155,7 @@ class ClusterMapActivity : Activity() {
         // AMS verification may finish after the first layout; apply persisted coordinates now too.
         updateMapLayout()
         root.post { updateMapLayout(); startGuidanceUpdates() }
+        if (display == 1) CameraInstrumentHost.borrowMap(this, root)
     }
 
     private fun waitForMapFrame() {
@@ -257,6 +258,7 @@ class ClusterMapActivity : Activity() {
         LegacyClusterMap.lifecycle(this, "onStop", actualDisplay)
         super.onStop()
         // Hidden or replaced cluster windows must not keep a decoder surface attached.
+        CameraInstrumentHost.releaseMap(this)
         LegacyClusterMap.released(this)
         finish()
     }
@@ -268,6 +270,7 @@ class ClusterMapActivity : Activity() {
         MapMirrors.removePresentedListener(mapPresented)
         startupView?.dispose()
         LegacyClusterMap.lifecycle(this, "onDestroy", actualDisplay)
+        CameraInstrumentHost.releaseMap(this)
         LegacyClusterMap.released(this)
         super.onDestroy()
     }

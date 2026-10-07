@@ -41,6 +41,8 @@ object AirPlayPersistence {
     private const val KEY_HEVC_ENABLED = "hevc_enabled"
     private const val KEY_HEVC_SOFTWARE_DECODER = "hevc_software_decoder"
     private const val KEY_ADVANCED_AUDIO_CHANNEL_MAPPING = "advanced_audio_channel_mapping"
+    private const val KEY_MICROPHONE_NS = "microphone_noise_suppression"
+    private const val KEY_MICROPHONE_AEC = "microphone_echo_cancellation"
     private const val KEY_AUDIO_FOCUS_ENABLED = "audio_focus_enabled"
     private const val KEY_NAVIGATION_VOLUME_KEYS_ENABLED = "navigation_volume_keys_enabled"
     private const val KEY_MEDIA_AUDIO_CHANNEL = "media_audio_channel"
@@ -149,6 +151,20 @@ object AirPlayPersistence {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
             .putInt(KEY_NAVIGATION_STREAM_TYPE, streamType)
             .apply()
+    }
+
+    fun loadMicrophoneNoiseSuppression(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MICROPHONE_NS, false)
+
+    fun saveMicrophoneNoiseSuppression(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_MICROPHONE_NS, enabled).apply()
+    }
+
+    fun loadMicrophoneEchoCancellation(context: Context): Boolean =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_MICROPHONE_AEC, false)
+
+    fun saveMicrophoneEchoCancellation(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putBoolean(KEY_MICROPHONE_AEC, enabled).apply()
     }
 
     fun loadAudioFocusEnabled(context: Context): Boolean =

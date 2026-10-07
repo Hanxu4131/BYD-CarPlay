@@ -13,6 +13,7 @@ object BydNavigationOutputs {
     }
     fun setDiagnosticHold(hold: Boolean) { BydStandaloneHudOutput.syntheticHold = hold }
     @Volatile private var useStandalone = false
+    @Volatile private var navigationSessionActive = false
     private val standalone = NavigationOutputWorker("diplay-standalone-output", BydStandaloneNavigationBridge::clear)
     private val hud = NavigationOutputWorker("diplay-hud-output", BydHudBridge::clear)
     private val cluster = NavigationOutputWorker("diplay-cluster-output", BydClusterBridge::clear)
@@ -42,10 +43,11 @@ object BydNavigationOutputs {
 
     fun start(context: Context, sessionStarted: Boolean = true) {
         val app = context.applicationContext
+        if (sessionStarted) navigationSessionActive = true
         useStandalone = BydStandaloneHudOutput.available(app)
         if (useStandalone) standalone.start { BydStandaloneNavigationBridge.initialize(app) }
         else {
-            hud.start { BydHudBridge.initialize(app) }
+            hudSettingChanged(app)
             cluster.start { BydClusterBridge.initialize(app) }
         }
         BydClusterMapPause.initialize(app)
@@ -70,6 +72,15 @@ object BydNavigationOutputs {
     /** The dashboard song setting changed; applies at once. */
     fun clusterSongChanged() = BydClusterSong.settingChanged()
 
+    /** This switch must not clear or restart instrument maps, songs or the combined receiver. */
+    fun hudSettingChanged(context: Context) {
+        val app = context.applicationContext
+        if (navigationSessionActive && !useStandalone && BydOutputSettings.hudEnabled(app) &&
+            BydOutputSettings.independentHudAvailable(app)) {
+            hud.start { BydHudBridge.initialize(app) }
+        } else hud.clear()
+    }
+
     /** Best effort while alive; Android does not guarantee callbacks before force-stop. */
-    fun endNow() { standalone.clear(); hud.clear(); cluster.clear(); BydClusterSong.end() }
+    fun endNow() { navigationSessionActive = false; standalone.clear(); hud.clear(); cluster.clear(); BydClusterSong.end() }
 }

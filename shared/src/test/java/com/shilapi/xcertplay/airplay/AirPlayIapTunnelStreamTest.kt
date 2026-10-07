@@ -5,7 +5,12 @@ import java.net.Socket
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [29], manifest = Config.NONE)
 class AirPlayIapTunnelStreamTest {
     @Test
     fun inputConnectionCloseKeepsEventChannelAvailableForOutboundIap() {

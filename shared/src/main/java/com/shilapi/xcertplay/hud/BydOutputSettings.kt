@@ -4,12 +4,13 @@ import android.content.Context
 import com.shilapi.xcertplay.transport.EvChargingConnectors
 
 /**
- * One user switch for BYD navigation output. On the tested car the windshield HUD mirrors what the
- * instrument cluster receives, so separate HUD/cluster switches cannot behave independently.
+ * Legacy combined navigation output and the optional independent windshield HUD use separate keys.
+ * A combined receiver must never be presented as an independent HUD control.
  */
 object BydOutputSettings {
     private const val PREFS = "diplay_byd_outputs"
     private const val KEY_ENABLED = "navigation_enabled"
+    private const val KEY_HUD_ENABLED = "independent_hud_enabled"
     private const val KEY_CLUSTER_STREAM_PAUSE = "cluster_stream_pause"
     private const val KEY_BATTERY_TO_IPHONE = "battery_to_iphone"
     private const val KEY_LOW_CHARGE_PERCENT = "low_charge_percent"
@@ -24,6 +25,19 @@ object BydOutputSettings {
     fun enabled(context: Context): Boolean = prefs(context).getBoolean(KEY_ENABLED, true)
 
     fun setEnabled(context: Context, enabled: Boolean) = prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply()
+
+    fun hudEnabled(context: Context): Boolean = prefs(context).getBoolean(KEY_HUD_ENABLED, false)
+
+    fun setHudEnabled(context: Context, enabled: Boolean) =
+        prefs(context).edit().putBoolean(KEY_HUD_ENABLED, enabled).apply()
+
+    fun independentHudAvailable(context: Context): Boolean =
+        !BydStandaloneHudOutput.available(context) && runCatching {
+            val service = context.packageManager.getServiceInfo(android.content.ComponentName(
+                "com.ts.car.someip.service", "com.ts.car.someip.service.manager.SomeIpServerService"), 0)
+            service.enabled && service.exported && (service.permission.isNullOrEmpty() ||
+                context.checkSelfPermission(service.permission) == android.content.pm.PackageManager.PERMISSION_GRANTED)
+        }.getOrDefault(false)
 
     /** Ask the iPhone to stop drawing the cluster map while the cluster hides it (needs ADB over network). */
     fun clusterStreamPause(context: Context): Boolean = prefs(context).getBoolean(KEY_CLUSTER_STREAM_PAUSE, false)

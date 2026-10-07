@@ -8,6 +8,36 @@ import org.junit.Test
 
 class AirPlayInfoPlistTest {
     @Test
+    fun bothDisplaysDeclareAutomaticUiAndMapAppearanceOnTheWire() {
+        val config = AirPlayConfig(
+            deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:02",
+            sourceVersion = "366.0", main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+            cluster = AirPlayDisplayConfig(widthPixels = 800, heightPixels = 480),
+        )
+        val info = BplistCodec.decode(BplistCodec.encode(AirPlayInfoPlist.build(config))) as Map<*, *>
+        val displays = info["displays"] as List<*>
+        assertEquals(2, displays.size)
+        for (display in displays.map { it as Map<*, *> }) {
+            for (key in listOf("uiAppearanceMode", "uiAppearanceSetting", "mapAppearanceMode", "mapAppearanceSetting")) {
+                assertEquals(0, (display[key] as Number).toInt())
+            }
+        }
+    }
+
+    @Test
+    fun initialCarAppearanceRetainsBooleanTypeAndOmitsUnknownState() {
+        val config = AirPlayConfig(
+            deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:02",
+            sourceVersion = "366.0", main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720),
+        )
+        assertFalse(AirPlayInfoPlist.build(config).containsKey("nightMode"))
+        for (night in listOf(false, true)) {
+            val info = BplistCodec.decode(BplistCodec.encode(AirPlayInfoPlist.build(config.copy(nightMode = night)))) as Map<*, *>
+            assertEquals(night, info["nightMode"])
+        }
+    }
+
+    @Test
     fun defaultDisplayIncludesFullViewAndSafeAreas() {
         val info = AirPlayInfoPlist.build(
             AirPlayConfig(

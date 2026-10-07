@@ -5,6 +5,38 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class VideoDecodeQueueTest {
+    @Test fun backlogSnapshotCountsOnlyFramesBeforeTheNextControlJob() {
+        val barriers = listOf(
+            VideoJob.Config(VideoCodec.H264, byteArrayOf(1)),
+            VideoJob.SurfaceChanged(null),
+            VideoJob.Resync,
+        )
+        for (barrier in barriers) {
+            val queue = VideoDecodeQueue()
+            val current = VideoJob.Frame(byteArrayOf(1), receivedNs = 10)
+            queue.offer(current)
+            queue.offer(VideoJob.Frame(byteArrayOf(2), receivedNs = 30))
+            queue.offer(VideoJob.Frame(byteArrayOf(3), receivedNs = 20))
+            queue.offer(barrier)
+            queue.offer(VideoJob.Frame(byteArrayOf(4), receivedNs = 100))
+            assertSame(current, queue.poll(0))
+            assertEquals(VideoDecodeQueue.Backlog(2, 30L), queue.backlogAfterCurrent())
+            assertNotNull(queue.poll(0)); assertNotNull(queue.poll(0))
+            assertEquals(VideoDecodeQueue.Backlog(0, null), queue.backlogAfterCurrent())
+            assertSame(barrier, queue.poll(0))
+            assertEquals(VideoDecodeQueue.Backlog(1, 100L), queue.backlogAfterCurrent())
+        }
+    }
+
+    @Test fun backlogSnapshotDoesNotConsumeTheStaticTail() {
+        val queue = VideoDecodeQueue()
+        val frame = VideoJob.Frame(byteArrayOf(1), receivedNs = 42)
+        queue.offer(frame)
+        assertEquals(VideoDecodeQueue.Backlog(1, 42L), queue.backlogAfterCurrent())
+        assertSame(frame, queue.poll(0))
+        assertEquals(VideoDecodeQueue.Backlog(0, null), queue.backlogAfterCurrent())
+    }
+
     @Test fun lostReferenceChainWaitsForSuccessfullyQueuedKeyframe() {
         val chain = VideoReferenceChain()
         val predicted = byteArrayOf(0, 0, 0, 1, 0x41, 1)
@@ -43,6 +75,75 @@ class VideoDecodeQueueTest {
         queue.offer(VideoJob.Frame(ByteArray(6)))
         assertEquals(VideoJob.Resync, queue.poll(0))
         assertNull(queue.poll(0))
+    }
+
+    @Test fun diagnosticsObserveQueueWithoutConsumingFramesAndResetOnlyWindowCounters() {
+        val queue = VideoDecodeQueue(maxFrames = 2, maxBytes = 8)
+        val config = VideoJob.Config(VideoCodec.H264, byteArrayOf(1))
+        val first = VideoJob.Frame(ByteArray(3))
+        queue.offer(config); queue.offer(first)
+        val initial = queue.takeDiagnostics()
+        assertTrue(initial.contains("pendingFrames=1 pendingBytes=3"))
+        assertTrue(initial.contains("peakPendingFrames=1 peakPendingBytes=3"))
+        assertSame(config, queue.poll(0)); assertSame(first, queue.poll(0))
+        queue.offer(VideoJob.Frame(ByteArray(3)))
+        queue.offer(VideoJob.Frame(ByteArray(3)))
+        queue.offer(VideoJob.Frame(ByteArray(3)))
+        queue.recordStaleRecovery()
+        val overflow = queue.takeDiagnostics()
+        assertTrue(overflow.contains("queueOverflows=1 staleRecoveries=1"))
+        assertTrue(overflow.contains("peakPendingFrames=2 peakPendingBytes=6"))
+        assertEquals(VideoJob.Resync, queue.poll(0))
+        assertNotNull(queue.poll(0)); assertNull(queue.poll(0))
+        assertTrue(queue.takeDiagnostics().contains("queueOverflows=0 staleRecoveries=0"))
+    }
+
+    @Test fun invalidatedChainDropsOldFramesAndResyncButPreservesTheNextControlSegment() {
+        for (barrier in listOf(
+            VideoJob.Config(VideoCodec.H264, byteArrayOf(1)), VideoJob.SurfaceChanged(null),
+        )) {
+            val queue = VideoDecodeQueue()
+            queue.offer(VideoJob.Frame(byteArrayOf(1)))
+            queue.offer(VideoJob.Resync)
+            queue.offer(VideoJob.Frame(byteArrayOf(2)))
+            queue.offer(barrier)
+            val next = VideoJob.Frame(byteArrayOf(3))
+            queue.offer(next)
+            queue.offer(VideoJob.Resync)
+            queue.discardCurrentChain()
+            assertSame(barrier, queue.poll(0))
+            assertSame(next, queue.poll(0))
+            assertSame(VideoJob.Resync, queue.poll(0))
+            assertNull(queue.poll(0))
+        }
+    }
+
+    @Test fun invalidatedChainWithoutControlBarrierIsCompletelyDiscarded() {
+        val queue = VideoDecodeQueue()
+        queue.offer(VideoJob.Resync)
+        queue.offer(VideoJob.Frame(byteArrayOf(1)))
+        queue.discardCurrentChain()
+        assertNull(queue.poll(0))
+        assertEquals(VideoDecodeQueue.Backlog(0, null), queue.backlogAfterCurrent())
+        val fresh = VideoJob.Frame(byteArrayOf(2))
+        queue.offer(fresh)
+        assertSame(fresh, queue.poll(0))
+    }
+
+    @Test fun slowConfigurationRejectsOnlyHardStaleKeyframesWithNewerBacklog() {
+        val now = 2_000_000_000L
+        assertTrue(VideoRecoveryFrameAge.isObsolete(now, 500_000_000L,
+            VideoDecodeQueue.Backlog(3, 600_000_000L)))
+        assertFalse(VideoRecoveryFrameAge.isObsolete(now, 500_000_001L,
+            VideoDecodeQueue.Backlog(3, 600_000_001L)))
+        assertFalse(VideoRecoveryFrameAge.isObsolete(now, 0,
+            VideoDecodeQueue.Backlog(0, null))) // A static tail is still useful.
+        assertFalse(VideoRecoveryFrameAge.isObsolete(now, 0,
+            VideoDecodeQueue.Backlog(2, 99_999_999L)))
+        assertFalse(VideoRecoveryFrameAge.isObsolete(now, 0,
+            VideoDecodeQueue.Backlog(3, now + 1)))
+        assertFalse(VideoRecoveryFrameAge.isObsolete(now, now + 1,
+            VideoDecodeQueue.Backlog(3, now + 2)))
     }
 
     @Test fun fullOutputMustBeDrainedWhileRetryingTheSameInput() {

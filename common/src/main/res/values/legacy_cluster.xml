@@ -25,7 +25,7 @@
     <string name="legacy_cluster_reset">恢复默认</string>
     <string name="legacy_cluster_content">仪表显示内容</string>
     <string name="legacy_l1_restore">地图之后显示 L1Mini 仪表</string>
-    <string name="legacy_l1_restore_help">地图窗口就绪后重新打开 L1Mini 仪表，避免地图盖住摄像头。需在 L1Mini 中开启仪表和开机启动。唤醒后已启动的 L1Mini 后台持续 30 秒未就绪时，每次唤醒最多恢复一次，摄像头会短暂中断。需要网络 ADB。</string>
+    <string name="legacy_l1_restore_help">仪表地图就绪后检查 L1Mini，未启动或后台未就绪时自动尝试启动／唤醒一次，正常时恢复仪表覆盖。需在 L1Mini 中开启仪表模式和开机启动，并开启车机网络 ADB。</string>
     <string name="legacy_cluster_map">地图</string>
     <string name="legacy_cluster_turn_card">转向提示</string>
     <string name="legacy_cluster_map_and_turn">地图加提示</string>

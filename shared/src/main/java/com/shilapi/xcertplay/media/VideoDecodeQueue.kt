@@ -29,23 +29,70 @@ internal class VideoReferenceChain {
 
 /** Limit latency and memory without ever dropping a reference frame silently. */
 internal class VideoDecodeQueue(
-    // Wi-Fi delivers frames in bursts after a radio gap; the decoder's 250 ms age check bounds latency.
+    // Bursts may be old without a growing backlog; recovery also checks age and queue progress.
     private val maxFrames: Int = 60,
     private val maxBytes: Int = 8 * 1024 * 1024,
 ) {
     private val jobs = LinkedBlockingQueue<VideoJob>()
+    private var peakFrames = 0
+    private var peakBytes = 0L
+    private var overflows = 0
+    private var staleRecoveries = 0
+
+    @Synchronized fun recordStaleRecovery() { staleRecoveries++ }
+
+    data class Backlog(val pendingFrames: Int, val newestPendingReceivedNs: Long?)
+
+    /** Called by the sole consumer after taking its current frame. Control jobs end this chain. */
+    @Synchronized fun backlogAfterCurrent(): Backlog {
+        var frames = 0
+        var newest: Long? = null
+        for (job in jobs) {
+            if (job !is VideoJob.Frame) break
+            frames++
+            newest = newest?.let { maxOf(it, job.receivedNs) } ?: job.receivedNs
+        }
+        return Backlog(frames, newest)
+    }
+
+    /** Read only every stats window; do not infer on-screen FPS from queue depth. */
+    @Synchronized fun takeDiagnostics(): String {
+        val frames = jobs.filterIsInstance<VideoJob.Frame>()
+        val currentBytes = frames.sumOf { it.nalus.size.toLong() }
+        val result = "pendingFrames=${frames.size} pendingBytes=$currentBytes " +
+            "peakPendingFrames=$peakFrames peakPendingBytes=$peakBytes " +
+            "queueOverflows=$overflows staleRecoveries=$staleRecoveries"
+        peakFrames = frames.size; peakBytes = currentBytes; overflows = 0; staleRecoveries = 0
+        return result
+    }
 
     @Synchronized fun offer(job: VideoJob) {
         if (job is VideoJob.Frame) {
             val frames = jobs.filterIsInstance<VideoJob.Frame>()
-            if (frames.size >= maxFrames || frames.sumOf { it.nalus.size.toLong() } + job.nalus.size > maxBytes) {
+            val bytes = frames.sumOf { it.nalus.size.toLong() }
+            val overflow = frames.size >= maxFrames || bytes + job.nalus.size > maxBytes
+            if (overflow) {
+                overflows++
                 discardFrames()
                 jobs.offer(VideoJob.Resync)
             }
             // A single oversized frame is also a lost reference chain.
             if (job.nalus.size > maxBytes) return
+            peakFrames = maxOf(peakFrames, (if (overflow) 0 else frames.size) + 1)
+            peakBytes = maxOf(peakBytes, (if (overflow) 0L else bytes) + job.nalus.size)
         }
         jobs.offer(job)
+    }
+
+    /** Drop only the invalidated chain; the next config/surface owns later frames. */
+    @Synchronized fun discardCurrentChain() {
+        val iterator = jobs.iterator()
+        while (iterator.hasNext()) {
+            when (iterator.next()) {
+                is VideoJob.Config, is VideoJob.SurfaceChanged -> return
+                is VideoJob.Frame, VideoJob.Resync -> iterator.remove()
+            }
+        }
     }
 
     @Synchronized fun discardFrames() {

@@ -38,6 +38,9 @@ import com.shilapi.xcertplay.airplay.CarPlayClusterDisplay
 import com.shilapi.xcertplay.hud.BydAdbAccess
 import com.shilapi.xcertplay.hud.BydNavigationOutputs
 import com.shilapi.xcertplay.hud.BydOutputSettings
+import com.shilapi.xcertplay.media.AmbientColorSpeed
+import com.shilapi.xcertplay.media.AmbientColorMode
+import com.shilapi.xcertplay.media.AmbientMusicSettings
 import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
 import com.shilapi.xcertplay.transport.EvChargingConnectors
@@ -49,6 +52,7 @@ import kotlin.math.roundToInt
 
 /** DiAuto's visual language, with a connection flow for an independent CarPlay receiver. */
 class DiPlayActivity : ComponentActivity() {
+    private var navigationServiceStatus: TextView? = null
     private val handler = Handler(Looper.getMainLooper())
     private var wheelMappingDialog: AlertDialog? = null
     private var page = "home"
@@ -74,13 +78,17 @@ class DiPlayActivity : ComponentActivity() {
     private var legacyClusterCheckInProgress = false
     private var legacyRegionEditor: AlertDialog? = null
     private var adbCheckGeneration = 0
+    private val firstRunPermissions = FirstRunPermissionController(this,
+        external = { action -> launchExternalPage(action) },
+        finished = { handler.post { resumeEntryRouting() } })
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         connect(notificationTransport)
     }
     private val tick = object : Runnable {
         override fun run() {
             refreshStatus()
-            if (DiPlayEntryRouting.route.connectionChanged(CarPlayBackgroundSession.active, page == "home") && setupError == null) {
+            navigationServiceStatus?.text = NavigationWheelServiceRecovery.status()
+            if (!firstRunPermissions.active && DiPlayEntryRouting.route.connectionChanged(CarPlayBackgroundSession.active, page == "home") && setupError == null) {
                 Log.i("DiPlayDisplay", "Connection completed; opening CarPlay from home")
                 openProjection()
                 DiPlayEntryRouting.route.projectionRedirected()
@@ -110,6 +118,10 @@ class DiPlayActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        firstRunPermissions.prepare(savedInstanceState)
+        if (firstRunPermissions.active) initialLaunch = false
+        CameraServices.ensure(applicationContext)
+        NavigationWheelServiceRecovery.ensure(applicationContext)
         languagePreferenceAtCreate = AppLocale.preference(this)
         com.shilapi.xcertplay.hud.BydNavigationOutputs.onAppOpened(applicationContext)
         WindowCompat.setDecorFitsSystemWindows(window, true)
@@ -126,9 +138,10 @@ class DiPlayActivity : ComponentActivity() {
         page = savedInstanceState?.getString("page") ?: intent.getStringExtra("page") ?: "home"
         recordProjectionEntry(intent, restoring = savedInstanceState != null)
         render()
-        handleWirelessRecovery()
+        if (!firstRunPermissions.active) handleWirelessRecovery()
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
+                if (firstRunPermissions.active) return
                 if (page != "home") { page = "home"; render() }
                 else { isEnabled = false; onBackPressedDispatcher.onBackPressed(); isEnabled = true }
             }
@@ -139,7 +152,7 @@ class DiPlayActivity : ComponentActivity() {
         super.onNewIntent(intent); setIntent(intent)
         recordProjectionEntry(intent)
         page = intent.getStringExtra("page") ?: "home"; render()
-        handleWirelessRecovery()
+        if (!firstRunPermissions.active) handleWirelessRecovery()
     }
     private fun recordProjectionEntry(incoming: Intent, restoring: Boolean = false) {
         val connected = CarPlayBackgroundSession.active
@@ -148,7 +161,7 @@ class DiPlayActivity : ComponentActivity() {
             "launcher=${incoming.hasCategory(Intent.CATEGORY_LAUNCHER)} explicitPage=${incoming.hasExtra("page")} " +
             "connected=$connected restoring=$restoring reopen=$reopenProjectionOnResume")
     }
-    override fun onSaveInstanceState(outState: Bundle) { outState.putString("page", page); outState.putBoolean("pending_car_hotspot", pendingCarHotspotSetup); super.onSaveInstanceState(outState) }
+    override fun onSaveInstanceState(outState: Bundle) { firstRunPermissions.save(outState); outState.putString("page", page); outState.putBoolean("pending_car_hotspot", pendingCarHotspotSetup); super.onSaveInstanceState(outState) }
     override fun onConfigurationChanged(newConfig: Configuration) { super.onConfigurationChanged(newConfig); render() }
     private fun openOverlayPermission() {
         val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
@@ -171,7 +184,7 @@ class DiPlayActivity : ComponentActivity() {
 
     override fun onUserLeaveHint() {
         super.onUserLeaveHint()
-        DiPlayEntryRouting.route.userLeaving(CarPlayBackgroundSession.active, openingExternalPage || openingProjection)
+        DiPlayEntryRouting.route.userLeaving(CarPlayBackgroundSession.active, openingExternalPage || openingProjection || firstRunPermissions.active)
         openingExternalPage = false
         openingProjection = false
     }
@@ -185,6 +198,12 @@ class DiPlayActivity : ComponentActivity() {
             return
         }
         handler.removeCallbacks(tick); handler.post(tick)
+        if (firstRunPermissions.active) { firstRunPermissions.resume(); return }
+        resumeEntryRouting()
+    }
+
+    private fun resumeEntryRouting() {
+        if (firstRunPermissions.active || isFinishing || isDestroyed) return
         val entryRequestedProjection = reopenProjectionOnResume
         reopenProjectionOnResume = false
         val routing = DiPlayEntryRouting.route
@@ -201,12 +220,13 @@ class DiPlayActivity : ComponentActivity() {
             initialLaunch = false
             if (setupError == null && !CarPlayBackgroundSession.hasSession() &&
                 DiPlayPreferences.autoConnect(this) && intent.getStringExtra("page") == null) {
-                handler.post { connect(AirPlayPersistence.loadWirelessEnabled(this)) }
+                handler.post { if (!firstRunPermissions.active) connect(AirPlayPersistence.loadWirelessEnabled(this)) }
             }
         }
     }
     override fun onPause() { handler.removeCallbacks(tick); super.onPause() }
     override fun onDestroy() {
+        firstRunPermissions.close()
         wheelMappingDialog?.dismiss()
         legacyRegionEditor?.dismiss()
         legacyRegionEditor = null
@@ -411,10 +431,10 @@ class DiPlayActivity : ComponentActivity() {
             }
             choice(card, getString(R.string.frame_rate), listOf(getString(R.string.s_30_fps_lighter_load), getString(R.string.s_60_fps_smoother_motion)), if (AirPlayPersistence.loadFps(this) == 60) 1 else 0) { AirPlayPersistence.saveFps(this, if (it == 1) 60 else 30) }
             toggle(card, getString(R.string.efficient_video), getString(R.string.use_hevc_leave_off_for_the_widest_head_unit_compatibility), AirPlayPersistence.loadHevcEnabled(this)) { AirPlayPersistence.saveHevcEnabled(this, it) }
-            toggle(card, "分屏自适应（H.264实验）", "需关闭高效视频并重新连接一次。仅切换已预声明的全屏/分屏区域；未确认时保留比例显示。", AdaptiveDisplayPreferences.enabled(this)) {
+            toggle(card, "分屏自适应（H.264）", "需关闭高效视频并重新连接一次。仅切换已预声明的全屏/分屏区域；未确认时保留比例显示。", AdaptiveDisplayPreferences.enabled(this)) {
                 AdaptiveDisplayPreferences.setEnabled(this, it)
             }
-            toggle(card, "中控直角画面（实验）", "H.264 模式请求独立圆角遮罩，中控不叠加遮罩。HEVC 保持原有显示方式。修改后需重新连接。", AdaptiveDisplayPreferences.squareCorners(this)) {
+            toggle(card, "中控直角画面", "H.264 模式请求独立圆角遮罩，中控不叠加遮罩。HEVC 保持原有显示方式。修改后需重新连接。", AdaptiveDisplayPreferences.squareCorners(this)) {
                 AdaptiveDisplayPreferences.setSquareCorners(this, it)
             }
             toggle(card, getString(R.string.right_hand_drive), getString(R.string.place_carplay_s_controls_closer_to_the_driver), AirPlayPersistence.loadRightHandDrive(this)) { AirPlayPersistence.saveRightHandDrive(this, it) }
@@ -426,6 +446,7 @@ class DiPlayActivity : ComponentActivity() {
             toggle(card, getString(R.string.contrib_audio_home_toggle_audio_focus), getString(R.string.contrib_audio_home_toggle_audio_focus_desc), AirPlayPersistence.loadAudioFocusEnabled(this)) { AirPlayPersistence.saveAudioFocusEnabled(this, it) }
             toggle(card, getString(R.string.navigation_volume_wheel), getString(R.string.navigation_volume_wheel_help), AirPlayPersistence.loadNavigationVolumeWheelEnabled(this)) {
                 AirPlayPersistence.saveNavigationVolumeWheelEnabled(this, it)
+                NavigationWheelServiceRecovery.changed(this)
             }
             if (resources.getBoolean(R.bool.config_advanced_audio_channel_mapping)) {
                 toggle(card, getString(R.string.advanced_audio_channel_mapping),
@@ -434,8 +455,24 @@ class DiPlayActivity : ComponentActivity() {
                     AirPlayPersistence.saveAdvancedAudioChannelMapping(this, it)
                 }
             }
+            if (resources.getBoolean(R.bool.config_system_microphone_effects_allowed)) {
+                toggle(card, "麦克风降噪", "减少麦克风收音中的背景噪声。修改后从下一次语音或通话开始生效，无需重新连接。",
+                    AirPlayPersistence.loadMicrophoneNoiseSuppression(this)) {
+                    AirPlayPersistence.saveMicrophoneNoiseSuppression(this, it)
+                }
+                toggle(card, "麦克风回声消除", "减少扬声器声音被麦克风再次收录的回声。修改后从下一次语音或通话开始生效，无需重新连接。",
+                    AirPlayPersistence.loadMicrophoneEchoCancellation(this)) {
+                    AirPlayPersistence.saveMicrophoneEchoCancellation(this, it)
+                }
+            }
             mediaChannelControl(card)
             navigationChannelControl(card)
+        }
+        section(content, "氛围灯") { card ->
+            val current = AmbientMusicSettings.load(this)
+            card.addView(button(ambientConfigurationLabel(current), false) {
+                showAmbientConfiguration()
+            }, matchButton(0, 60))
         }
         section(content, "歌曲与歌词") { card ->
             card.addView(label(getString(R.string.cluster_song_description), 14, MUTED))
@@ -506,10 +543,15 @@ class DiPlayActivity : ComponentActivity() {
                 }
             }, matchButton(10, 56))
         }
-        if (com.shilapi.xcertplay.hud.BydOutputSettings.available(this)) section(content, getString(R.string.byd_navigation), R.drawable.ic_dp_navigation) { card ->
-            toggle(card, getString(R.string.navigation_on_hud_and_instrument_cluster),
-                getString(R.string.show_phone_navigation_arrows_distance_and_street_names_on),
-                com.shilapi.xcertplay.hud.BydOutputSettings.enabled(this)) { com.shilapi.xcertplay.hud.BydOutputSettings.setEnabled(this, it) }
+        section(content, getString(R.string.byd_navigation), R.drawable.ic_dp_navigation) { card ->
+            val independentHud = BydOutputSettings.independentHudAvailable(this)
+            toggle(card, "原车 HUD 导航",
+                if (independentHud) "通过独立 HUD 接口显示导航提示，不改变仪表地图。"
+                else "当前车机尚未适配独立 HUD 接口。此项关闭，不影响现有仪表地图。",
+                independentHud && BydOutputSettings.hudEnabled(this), enabled = independentHud) {
+                BydOutputSettings.setHudEnabled(this, it)
+                BydNavigationOutputs.hudSettingChanged(this)
+            }
             if (ClusterMapPresentation.findDisplay(this) != null) {
                 toggle(card, getString(R.string.carplay_map_on_instrument_cluster_experimental),
                     getString(R.string.shows_the_iphone_s_cluster_map_on_the_instrument_cluster_c),
@@ -655,6 +697,7 @@ class DiPlayActivity : ComponentActivity() {
             }, matchButton(10, 56))
         }
         section(content, getString(R.string.permissions_and_connection_help), R.drawable.ic_dp_permissions) { card ->
+            card.addView(button("集中检查权限", false) { initialLaunch = false; firstRunPermissions.startManually() }, matchButton(0, 60))
             card.addView(label(getString(R.string.nearby_devices_connects_your_iphone_microphone_enables_sir), 16, MUTED))
             card.addView(button(getString(R.string.app_permissions), false) { openSystem(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName"))) }, matchButton(16, 60))
             card.addView(button(getString(R.string.bluetooth_settings), false) { openSystem(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)) }, matchButton(10, 60))
@@ -1147,6 +1190,7 @@ class DiPlayActivity : ComponentActivity() {
     }
 
     private fun connect(wireless: Boolean) {
+        if (firstRunPermissions.active) return
         if (wireless && pendingCarHotspotSetup) { toast(getString(R.string.save_your_hotspot_details_in_connection_setup_first)); page = "connection"; render(); return }
         if (setupError != null) { toast(setupError!!); return }
         if (wireless && AirPlayPersistence.loadWirelessHotspotMode(this) == WirelessHotspotMode.MANUAL &&
@@ -1177,6 +1221,7 @@ class DiPlayActivity : ComponentActivity() {
     }
     @Suppress("DEPRECATION")
     private fun openProjection() {
+        if (firstRunPermissions.active) return
         DiPlayEntryRouting.route.projectionOpened()
         openingProjection = true
         val displayId = window.decorView.display?.displayId ?: windowManager.defaultDisplay.displayId
@@ -1499,13 +1544,93 @@ class DiPlayActivity : ComponentActivity() {
         build(card)
         parent.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
     }
-    private fun toggle(parent: LinearLayout, title: String, description: String, value: Boolean, save: (Boolean) -> Unit) {
+    private fun toggle(parent: LinearLayout, title: String, description: String, value: Boolean, enabled: Boolean = true, save: (Boolean) -> Unit) {
         val line = row().apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(12), 0, dp(12)) }
         val text = column(); text.addView(label(title, 18, TEXT, true)); text.addView(label(description, 14, MUTED).apply { setPadding(0, dp(6), dp(16), 0) })
         line.addView(text, LinearLayout.LayoutParams(0, -2, 1f))
-        line.addView(Switch(this).apply { contentDescription = title; isChecked = value; minHeight = dp(56); buttonTintList = ColorStateList.valueOf(ACCENT); setOnCheckedChangeListener { _, checked -> save(checked) } })
+        line.addView(Switch(this).apply { contentDescription = title; isEnabled = enabled; isChecked = value; minHeight = dp(56); buttonTintList = ColorStateList.valueOf(ACCENT); setOnCheckedChangeListener { _, checked -> save(checked) } })
         parent.addView(line)
     }
+    private fun ambientConfigurationLabel(value: AmbientMusicSettings.Values): String {
+        val mode = if (!value.music) "静态" else when (value.colorMode) {
+            AmbientColorMode.ENERGY -> "随声音强弱"
+            AmbientColorMode.BEAT -> "随节拍"
+            AmbientColorMode.TEMPO -> "随BPM（估算）"
+            AmbientColorMode.BASS -> "鼓点优先"
+            AmbientColorMode.SMART -> "智能跟随"
+        }
+        val speed = when (value.speed) { AmbientColorSpeed.SLOW -> "舒缓"; AmbientColorSpeed.STANDARD -> "标准"; AmbientColorSpeed.FAST -> "快速" }
+        return "${if (value.enabled) "已开启" else "已关闭"} · $mode · $speed · ${if (value.colorSource == com.shilapi.xcertplay.media.AmbientColorSource.ALBUM) "封面主色" else "${value.selectedColors.size}色"} · 亮度${value.brightness}"
+    }
+
+    private fun showAmbientConfiguration() {
+        var draft = AmbientMusicSettings.load(this)
+        val body = column().apply { setPadding(dp(24), dp(12), dp(24), dp(12)) }
+        toggle(body, "开启氛围灯控制", "关闭后恢复接管前的原车灯光。", draft.enabled) {
+            draft = draft.copy(enabled = it)
+        }
+        toggle(body, "音乐律动", "开启时播放随音乐变化，暂停时降到原车最低档；关闭时使用固定颜色和亮度。保存后生效。", draft.music) {
+            draft = draft.copy(music = it)
+        }
+        choice(body, "颜色变化方式", listOf("随声音强弱", "随节拍", "随BPM（估算）", "鼓点优先", "智能跟随"), draft.colorMode.ordinal, reconnects = false) {
+            draft = draft.copy(colorMode = AmbientColorMode.entries[it])
+        }
+        choice(body, "律动速度", listOf("舒缓", "标准", "快速"), draft.speed.ordinal, reconnects = false) {
+            draft = draft.copy(speed = AmbientColorSpeed.entries[it])
+        }
+        choice(body, "颜色方案", listOf("自选颜色", "专辑封面主色"), draft.colorSource.ordinal, reconnects = false) {
+            draft = draft.copy(colorSource = com.shilapi.xcertplay.media.AmbientColorSource.entries[it])
+        }
+        body.addView(label("音乐律动开启时，围绕封面主色变化；封面缺失或没有有效主色时，从全部颜色随机变化。关闭音乐律动时保持固定颜色。自选颜色会保留。", 14, MUTED))
+        val paletteButton = button("颜色 · 已选${draft.selectedColors.size}种", false) {}
+        paletteButton.setOnClickListener {
+            val checked = BooleanArray(31) { it + 1 in draft.selectedColors }
+            val paletteDialog = AlertDialog.Builder(this).setTitle("氛围灯颜色（多选）")
+                .setMultiChoiceItems((1..31).map { index ->
+                    val palette = com.shilapi.xcertplay.media.AmbientAlbumPalette
+                    android.text.SpannableString("●  ${palette.previewName(index)}（$index）").apply {
+                        setSpan(android.text.style.ForegroundColorSpan(palette.previewRgb(index)),
+                            0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                        setSpan(android.text.style.RelativeSizeSpan(1.4f),
+                            0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
+                }.toTypedArray(), checked) { _, index, selected -> checked[index] = selected }
+                .setNeutralButton("全选", null)
+                .setPositiveButton(getString(R.string.save), null)
+                .setNegativeButton(getString(R.string.cancel), null).create()
+            paletteDialog.setOnShowListener {
+                paletteDialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                    checked.fill(true)
+                    for (index in checked.indices) paletteDialog.listView.setItemChecked(index, true)
+                }
+                paletteDialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                    val selected = checked.indices.filter { checked[it] }.map { it + 1 }
+                    if (selected.isEmpty()) toast("至少选择一种颜色")
+                    else {
+                        draft = draft.copy(selectedColors = selected, color = selected.first())
+                        paletteButton.text = "颜色 · 已选${selected.size}种"
+                        paletteDialog.dismiss()
+                    }
+                }
+            }
+            paletteDialog.show()
+        }
+        body.addView(paletteButton, matchButton(0, 60)); body.addView(space(12))
+        choice(body, "亮度上限", (0..6).map { if (it == 0) "0（最低亮度）" else it.toString() }, draft.brightness, reconnects = false) {
+            draft = draft.copy(brightness = it)
+        }
+        choice(body, "区域", listOf("前排", "后排", "全部"), draft.area - 1, reconnects = false) {
+            draft = draft.copy(area = it + 1)
+        }
+        AlertDialog.Builder(this).setTitle("氛围灯配置")
+            .setView(ScrollView(this).apply { addView(body) })
+            .setPositiveButton(getString(R.string.save)) { _, _ ->
+                AmbientMusicSettings.save(this, draft.copy(colorCycle = draft.music))
+                render()
+            }
+            .setNegativeButton(getString(R.string.cancel), null).show()
+    }
+
     private fun choice(parent: LinearLayout, title: String, options: List<String>, current: Int, reconnects: Boolean = true, save: (Int) -> Unit) {
         var selection = current
         val button = button("$title · ${options[selection]}", false) {}

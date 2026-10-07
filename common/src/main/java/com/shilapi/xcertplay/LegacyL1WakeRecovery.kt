@@ -50,7 +50,7 @@ internal object LegacyL1WakeRecovery {
             registered = app
             wanted = stillWanted
         } else return // Without cancellation on screen-off, do not authorize a restart.
-        beginMonitor(app, stillWanted)
+        beginMonitor(app, stillWanted, postMapStartup = true)
     }
 
     /** Stop only this wake's pending work; retain the listener for the next screen-on. */
@@ -59,9 +59,10 @@ internal object LegacyL1WakeRecovery {
         worker.execute { policy.cancel() }
     }
 
-    private fun beginMonitor(app: Context, stillWanted: () -> Boolean) {
+    private fun beginMonitor(app: Context, stillWanted: () -> Boolean, postMapStartup: Boolean = false) {
         pauseMonitor()
-        poll(app, generation, 0, stillWanted, deadline = SystemClock.elapsedRealtime() + 90_000)
+        poll(app, generation, 0, stillWanted, deadline = SystemClock.elapsedRealtime() + 90_000,
+            postMapStartup = postMapStartup)
     }
 
     /** Map close, opt-out and app stop end the complete subscription. */
@@ -72,16 +73,23 @@ internal object LegacyL1WakeRecovery {
         wanted = null
     }
 
-    private fun snapshot(adb: LocalAdb): LegacyL1WakeRecoveryPolicy.Snapshot? {
+    private fun snapshot(app: Context, adb: LocalAdb): LegacyL1WakeRecoveryPolicy.Snapshot? {
         val power = adb.shell("dumpsys power") ?: return null
         val tasks = adb.shell("dumpsys activity activities") ?: return null
-        val pid = adb.shell("pidof l1tech.com.l1mini") ?: return null
+        // The installed L1 package can declare a different application process name.
+        val processName = LegacyL1WakeRecoveryPolicy.safeProcessName(runCatching {
+            app.packageManager.getApplicationInfo("l1tech.com.l1mini", 0).processName
+        }.getOrNull())
+        val pid = processName?.let { adb.shell("pidof $it") }
         val tcp = adb.shell("cat /proc/net/tcp") ?: return null
         val tcp6 = adb.shell("cat /proc/net/tcp6") ?: return null
-        return LegacyL1WakeRecoveryPolicy.snapshot(power, tasks, pid, tcp, tcp6)
+        val service = LegacyL1WakeRecoveryPolicy.bootServicePresent(
+            adb.shell("dumpsys activity services l1tech.com.l1mini/.L1BootService"))
+        return LegacyL1WakeRecoveryPolicy.snapshot(power, tasks, pid, tcp, tcp6).copy(bootService = service)
     }
 
-    private fun poll(app: Context, id: Int, count: Int, stillWanted: () -> Boolean, restarted: Boolean = false, deadline: Long) {
+    private fun poll(app: Context, id: Int, count: Int, stillWanted: () -> Boolean, requested: Boolean = false,
+        deadline: Long, postMapStartup: Boolean = false) {
         main.postDelayed({
             if (id != generation) return@postDelayed
             if (!stillWanted()) { cancel(); return@postDelayed }
@@ -91,7 +99,7 @@ internal object LegacyL1WakeRecovery {
             }
             worker.execute {
                 var again = true
-                var didRestart = restarted
+                var didRequest = requested
                 var sessionBudgetOnly = false
                 val result = runCatching {
                     LocalAdb(AdbKeys.load(app)).use { adb ->
@@ -99,27 +107,30 @@ internal object LegacyL1WakeRecovery {
                             policy.cancel()
                             return@use "recovery_adb_unavailable"
                         }
-                        val state = snapshot(adb) ?: run {
+                        val state = snapshot(app, adb) ?: run {
                             policy.cancel()
                             return@use "recovery_diagnostics_unavailable"
                         }
-                        if (restarted) {
+                        if (requested) {
                             if (!state.awake) return@use "recovery_cancelled"
                             if (state.listening == true) {
                                 main.post {
                                     if (id == generation && stillWanted()) LegacyL1MiniOrder.restore(app, stillWanted)
                                 }
                                 again = false
-                                return@use "recovery_backend_listening_after_restart"
+                                return@use "recovery_backend_listening_after_request"
                             }
                             return@use "recovery_start_unverified"
                         }
-                        when (policy.observe(SystemClock.elapsedRealtime(), state)) {
+                        when (val decision = policy.observe(SystemClock.elapsedRealtime(), state, postMapStartup)) {
                             LegacyL1WakeRecoveryPolicy.Decision.WAIT -> {
                                 again = true
                                 "recovery_waiting_for_stable_wake"
                             }
                             LegacyL1WakeRecoveryPolicy.Decision.HEALTHY -> {
+                                if (!state.dashboard) main.post {
+                                    if (id == generation && stillWanted()) LegacyL1MiniOrder.restore(app, stillWanted)
+                                }
                                 again = false
                                 "recovery_backend_listening"
                             }
@@ -127,15 +138,16 @@ internal object LegacyL1WakeRecovery {
                                 again = false
                                 "recovery_already_attempted_this_wake"
                             }
+                            LegacyL1WakeRecoveryPolicy.Decision.START_ONLY,
                             LegacyL1WakeRecoveryPolicy.Decision.RECOVER -> {
-                                // Re-read all evidence immediately before the destructive boundary.
-                                val fresh = snapshot(adb) ?: run {
+                                // Re-read all evidence immediately before either service action.
+                                val fresh = snapshot(app, adb) ?: run {
                                     policy.cancel()
                                     return@use "recovery_diagnostics_unavailable"
                                 }
-                                val freshDecision = policy.observe(SystemClock.elapsedRealtime(), fresh)
+                                val freshDecision = policy.observe(SystemClock.elapsedRealtime(), fresh, postMapStartup)
                                 if (id != generation || !stillWanted() || SystemClock.elapsedRealtime() >= deadline || fresh != state ||
-                                    freshDecision != LegacyL1WakeRecoveryPolicy.Decision.RECOVER ||
+                                    freshDecision != decision ||
                                     !policy.claim(fresh.wake ?: return@use "recovery_conditions_not_met")) {
                                     return@use "recovery_cancelled"
                                 }
@@ -153,14 +165,17 @@ internal object LegacyL1WakeRecovery {
                                 }
                                 if (id != generation || !stillWanted() || SystemClock.elapsedRealtime() >= deadline)
                                     return@use "recovery_cancelled"
-                                // One shell transaction prevents a cancelled UI callback leaving L1 stopped.
-                                didRestart = true
-                                val answer = adb.shell("$STOP && $START") ?: return@use "recovery_start_unverified"
+                                // Post-map wake-up and a dead process need only START; retain existing tasks.
+                                // One shell transaction keeps the restart path from leaving L1 stopped.
+                                val startOnly = decision == LegacyL1WakeRecoveryPolicy.Decision.START_ONLY
+                                didRequest = true
+                                val answer = adb.shell(if (startOnly) START else "$STOP && $START")
+                                    ?: return@use "recovery_start_unverified"
                                 if (answer.contains("Error", true) || answer.contains("Exception", true)) "recovery_start_rejected"
                                 else {
                                     again = true
-                                    didRestart = true
-                                    "recovery_restart_requested_camera_interruption"
+                                    if (startOnly) "recovery_start_only_requested"
+                                    else "recovery_restart_requested_camera_interruption"
                                 }
                             }
                         }
@@ -170,7 +185,7 @@ internal object LegacyL1WakeRecovery {
                     if (id != generation) return@post
                     val reported = if (sessionBudgetOnly) "${result}_session_budget_only" else result
                     Log.i("DiPlay-L1Recovery", "attempt=${count + 1} result=$reported")
-                    val startedNow = didRestart && !restarted
+                    val startedNow = didRequest && !requested
                     val withinDeadline = startedNow || SystemClock.elapsedRealtime() < deadline
                     LegacyClusterMap.l1OrderResult(app, count + 1,
                         if (again && !withinDeadline) "recovery_monitor_timeout" else reported)
@@ -178,7 +193,7 @@ internal object LegacyL1WakeRecovery {
                     if (!stillWanted()) cancel()
                     else if (again && withinDeadline) {
                         val nextDeadline = if (startedNow) SystemClock.elapsedRealtime() + 60_000 else deadline
-                        poll(app, id, count + 1, stillWanted, didRestart, nextDeadline)
+                        poll(app, id, count + 1, stillWanted, didRequest, nextDeadline, postMapStartup)
                     }
                 }
             }

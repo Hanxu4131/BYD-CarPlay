@@ -20,6 +20,33 @@ class DiagnosticRedactorTest {
             assertTrue(report.contains(video))
         } finally { folder.deleteRecursively() }
     }
+    @Test fun onlyNumericResponseTracesReachSavedReports() {
+        val folder = Files.createTempDirectory("diplay-response-report").toFile()
+        try {
+            val response = "TRACE airplay appearance response type=uiAppearanceUpdate cseq=7 status=200 body.status=-6722 body.error=0"
+            val unmatched = "TRACE airplay event response unmatched count=4 missingCseq=2 status=200 cseq=none"
+            SessionLogFile(folder.resolve("diplay.log")).use {
+                it.reset("started")
+                it.append("00:10:00.123  $response")
+                it.append(unmatched)
+                it.append("TRACE airplay appearance tx type=setNightMode cseq=8 night=false")
+                it.append("TRACE airplay appearance tx type=uiAppearanceUpdate cseq=9 mode=0 setting=2")
+                it.append("TRACE airplay event read reads=1 count=100 decrypted=80 parsed=1 encryptedRestBytes=0 plaintextRestBytes=0")
+                it.append("TRACE airplay appearance tx type=uiAppearanceUpdate cseq=9 mode=0 setting=2 uuid=private-id")
+                it.append("$response uuid=private-id")
+                it.append("TRACE airplay appearance response type=uiAppearanceUpdate cseq=7 status=200 body.error=private-id")
+                it.append("TRACE arbitrary protocol data")
+            }
+            val report = folder.resolve("diplay.log").readText()
+            assertTrue(report.contains(response))
+            assertTrue(report.contains(unmatched))
+            assertTrue(report.contains("type=setNightMode cseq=8 night=false"))
+            assertTrue(report.contains("type=uiAppearanceUpdate cseq=9 mode=0 setting=2"))
+            assertTrue(report.contains("event read reads=1 count=100"))
+            assertFalse(report.contains("private-id"))
+            assertFalse(report.contains("arbitrary"))
+        } finally { folder.deleteRecursively() }
+    }
     @Test fun payloadAndCredentialLinesNeverReachReports() {
         for (line in listOf("TRACE IAP2 tx key", "hotspot passphrase=secret", "token=secret", "certificate bytes=607", "rx body={phone: 'Jane'}", "ok\nsecret", "wifi ssid=Home", "wireless name=Jane Smith’s iPhone")) {
             assertNull(line, DiagnosticRedactor.redact(line))

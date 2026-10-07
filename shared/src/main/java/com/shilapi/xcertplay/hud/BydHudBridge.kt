@@ -4,9 +4,11 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.IBinder
 import android.os.Parcel
+import android.os.SystemClock
 import android.util.Log
 import com.shilapi.xcertplay.iap2.wire.Iap2Frame
 import java.util.concurrent.Executors
@@ -41,6 +43,8 @@ internal object BydHudBridge {
     private var showing = false
     private var lastSendResult: Int? = null
     private var icons: Map<Int, ByteArray>? = null
+    private val bindRetry = BydHudBindRetryPolicy()
+    private var active = false
 
     // The gateway pings registered callbacks and drops registrations that do not answer like an AIDL stub.
     private val callback = object : Binder() {
@@ -72,6 +76,8 @@ internal object BydHudBridge {
 
     fun initialize(appContext: Context) = synchronized(lock) {
         if (context == null) context = appContext.applicationContext
+        active = true
+        bindRetry.reset()
         bindLocked()
         if (!senderStarted) {
             senderStarted = true
@@ -99,16 +105,19 @@ internal object BydHudBridge {
     fun clearNow() = clear()
 
     fun clear() = synchronized(lock) {
+        active = false
+        bindRetry.reset()
         route.clear()
         clearHudLocked()
     }
 
     private fun tick() = synchronized(lock) {
+        if (!active) return@synchronized
         if (binder == null && !binding) bindLocked()
         sendCurrentLocked()
     }
 
-    private fun enabled(): Boolean = context?.let(BydOutputSettings::enabled) ?: false
+    private fun enabled(): Boolean = context?.let(BydOutputSettings::hudEnabled) ?: false
 
     private fun sendCurrentLocked() {
         if (binder == null || !started) return
@@ -161,7 +170,21 @@ internal object BydHudBridge {
 
     private fun bindLocked() {
         val appContext = context ?: return
-        if (binder != null || binding) return
+        if (!active || binder != null || binding) return
+        val now = SystemClock.elapsedRealtime()
+        if (!bindRetry.ready(now)) return
+        try {
+            // The merged manifest queries this package. Check the exact service, not a route handler.
+            // Leave permission/export checks to bindService, which knows the caller's privileges.
+            appContext.packageManager.getServiceInfo(ComponentName(SOMEIP_PACKAGE, SOMEIP_CLASS), 0)
+        } catch (_: PackageManager.NameNotFoundException) {
+            bindRetry.missing(now)
+            Log.i(TAG, "SOME/IP service absent; checking again in 60s")
+            return
+        } catch (error: Exception) {
+            // A failed package query does not prove absence; still try the explicit binding.
+            Log.w(TAG, "cannot check SOME/IP service", error)
+        }
         try {
             // The gateway's onUnbind requires a MIME type; a typeless bind crashes the whole SOME/IP process.
             val intent = Intent(SOMEIP_ACTION).apply {
@@ -169,9 +192,11 @@ internal object BydHudBridge {
                 type = appContext.packageName
             }
             binding = appContext.bindService(intent, connection, Context.BIND_AUTO_CREATE)
+            if (!binding) bindRetry.failed(SystemClock.elapsedRealtime())
             Log.i(TAG, "bindService=$binding")
         } catch (error: Throwable) {
             binding = false
+            bindRetry.failed(SystemClock.elapsedRealtime())
             Log.w(TAG, "cannot bind SOME/IP service", error)
         }
     }
@@ -186,6 +211,7 @@ internal object BydHudBridge {
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, service: IBinder) = onGatewayCallback {
+            bindRetry.reset()
             binder = service
             binding = true
             val registered = transactLocked(TX_REGISTER_CALLBACK, returnsValue = false) { it.writeStrongBinder(callback) }
@@ -255,5 +281,6 @@ internal object BydHudBridge {
         started = false
         showing = false
         guidanceSentLogged = false
+        if (active) bindRetry.failed(SystemClock.elapsedRealtime()) else bindRetry.reset()
     }
 }
