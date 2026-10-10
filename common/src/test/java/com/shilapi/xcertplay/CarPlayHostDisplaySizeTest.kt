@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.os.Looper
 import android.view.MotionEvent
 import android.view.Surface
@@ -15,6 +16,7 @@ import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.orchestration.MfiTarget
 import com.shilapi.xcertplay.transport.Iap2IdentificationConfig
 import java.time.Duration
+import java.net.Socket
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.atomic.AtomicBoolean
 import org.junit.After
@@ -325,6 +327,112 @@ class CarPlayHostDisplaySizeTest {
             assertEquals(geometry,selection.confirmed)
             assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
         } finally { renderer.close() }
+    }
+
+    @Test fun handoffWithTransientHeightAlignsAnUnchangedSplitWindow() {
+        withAdaptiveHandoff { selection, renderer, commands, texture, view ->
+            val full = MainAreaViewport(1920,1080,0,0,1920,1080)
+            assertEquals(size(1284,990),getField("activeDisplaySize"))
+            view.layout(0,0,1284,1080)
+            activity.javaClass.getDeclaredMethod("requestAdaptiveArea",sizeClass)
+                .apply { isAccessible = true }.invoke(activity,size(1284,1080))
+            scheduleSize(1284,1080)
+            assertEquals(full,selection.confirmed)
+            assertEquals(0,adaptiveAttempts(selection))
+
+            view.layout(0,0,1284,990)
+            val listener = getField("textureListener") as TextureView.SurfaceTextureListener
+            listener.onSurfaceTextureSizeChanged(texture,1284,990)
+            commands.runAll()
+            val epoch = getField("adaptiveRequestEpoch") as Long
+            assertTrue(selection.current(1,epoch))
+            assertNull(selection.confirmed)
+            assertEquals(1,adaptiveAttempts(selection))
+            assertNull(getField("pendingDisplaySize"))
+            assertTrue((getField("resizeTransition") as AdaptiveResizeTransition).active)
+            assertEquals(0,getField("restartGeneration"))
+
+            renderer.onVideoGeometry(110,VideoCodec.H264,MainAreaViewport(1920,1080,0,0,1284,990))
+            shadowOf(Looper.getMainLooper()).idle()
+            listener.onSurfaceTextureUpdated(texture)
+            assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
+            repeat(4) { scheduleSize(1284,990); applySize(1284,990) }
+            commands.runAll()
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(7))
+            commands.runAll()
+            assertEquals(1,adaptiveAttempts(selection))
+            assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
+            assertEquals(epoch,getField("adaptiveRequestEpoch"))
+        }
+    }
+
+    @Test fun unchangedSplitRetriesStayBoundedAfterHandoffTimeout() {
+        withAdaptiveHandoff { selection, _, commands, _, view ->
+            view.layout(0,0,1284,990)
+            applySize(1284,990)
+            commands.runAll()
+            assertEquals(1,adaptiveAttempts(selection))
+            val epoch = getField("adaptiveRequestEpoch") as Long
+            repeat(2) {
+                repeat(4) { scheduleSize(1284,988); scheduleSize(1284,990) }
+                shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(1))
+                commands.runAll()
+            }
+            assertEquals(3,adaptiveAttempts(selection))
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(5))
+            commands.runAll()
+            assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
+            repeat(4) { scheduleSize(1284,990); applySize(1284,990) }
+            commands.runAll()
+            assertEquals(3,adaptiveAttempts(selection))
+            assertTrue(selection.current(1,epoch))
+            assertFalse((getField("resizeTransition") as AdaptiveResizeTransition).active)
+            assertEquals(0,getField("restartGeneration"))
+        }
+    }
+
+    private fun adaptiveAttempts(selection: MainAreaSelection): Int = selection.javaClass
+        .getDeclaredField("requestAttempts").apply { isAccessible = true }.getInt(selection)
+
+    private fun withAdaptiveHandoff(
+        check: (MainAreaSelection, AndroidMediaSink, PausedExecutorService, SurfaceTexture, TextureView) -> Unit,
+    ) {
+        val areas = listOf(MainViewArea(1920,1080),MainViewArea(1284,990))
+        val selection = MainAreaSelection(1920,1080,areas,0)
+        assertTrue(selection.receive(VideoCodec.H264,MainAreaViewport(1920,1080,0,0,1920,1080)))
+        val renderer = AndroidMediaSink(adaptiveSelection = selection)
+        val config = AirPlayConfig(deviceName = "test",deviceId = "02:00:00:00:00:02",
+            btMac = "02:00:00:00:00:01",sourceVersion = "1",
+            main = AirPlayDisplayConfig(widthPixels = 1920,heightPixels = 1080,adaptiveViewAreas = areas))
+        val identity = AirPlayIdentity.generate()
+        val pairings = PairingStore()
+        val media = object : AirPlayMediaHandler {}
+        val session = AirPlaySession(Socket(),config,identity,pairings,null,object : AirPlaySessionListener {},media)
+        val controller = CarPlayController(activity,
+            CarPlayRuntimeConfig(mfiTarget = MfiTarget.LOCAL,identification = Iap2IdentificationConfig(
+                name = "test",modelIdentifier = "test",manufacturer = "test",serialNumber = "test",
+                firmwareVersion = "1",hardwareVersion = "1",carPlayUsbInterfaceNumber = 3)),
+            config,identity,pairings,object : AirPlaySessionListener {},media,{})
+        val commands = PausedExecutorService()
+        (getField("airPlayCommandExecutor") as ExecutorService).shutdownNow()
+        setField("airPlayCommandExecutor",commands)
+        val texture = SurfaceTexture(0)
+        val view = TextureView(activity) // No layout yet: adoption must use the stored host size.
+        try {
+            setField("videoView",view)
+            CarPlayBackgroundSession.store(controller,renderer,1284,990,Any(),
+                CarPlaySessionDisplay(1920,1080,Surface.ROTATION_0,true,true,1920,1080)) {}
+            assertEquals(true,activity.javaClass.getDeclaredMethod("adoptBackgroundSession")
+                .apply { isAccessible = true }.invoke(activity))
+            assertSame(controller,getField("controller"))
+            assertSame(renderer,getField("sink"))
+            setField("activeAirPlaySession",session)
+            setField("currentSurfaceTexture",texture)
+            check(selection,renderer,commands,texture,view)
+        } finally {
+            controller.close(); controller.awaitClosed(1000)
+            session.close(); renderer.close(); texture.release()
+        }
     }
 
     @Test fun firstUpgradedSplitHandshakeIsRememberedForFullscreenReconnect() {

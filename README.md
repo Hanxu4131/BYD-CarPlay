@@ -2,7 +2,9 @@
 
 寒叙（[@Hanxu4131](https://github.com/Hanxu4131)）基于 [DiPlay](https://github.com/shihabal3amri/DiPlay) 做的个人二次开发版，主要适配2023款唐 DM-i冠军版、21平台／控制器。保留原项目、xcertplay、DiAuto及已有贡献者的署名和许可证。
 
-当前完整源码为 **v1.0.13 / versionCode 105**。v1.0.0保留为第64版的历史基线，后续修复和功能在此基础上迭代。v1.0.13已完成本地测试、编译及覆盖安装，新增普通CarPlay加载封面的实车效果仍待确认；不把安装成功当作所有问题已解决。
+本分支是 **v1.0.14 / versionCode 106候选**，修复后台接管时同窗口尺寸漏发分屏区域请求；本地1214项测试通过，未安装、未实车确认。已安装v1.0.13及完整源码仍在main，新增修复见[说明](docs/ADAPTIVE_HANDOFF_FIX.md)。
+
+上一基线完整源码为 **v1.0.13 / versionCode 105**。v1.0.0保留为第64版的历史基线，后续修复和功能在此基础上迭代。v1.0.13已完成本地测试、编译及覆盖安装，新增普通CarPlay加载封面的实车效果仍待确认；不把安装成功当作所有问题已解决。
 
 ## 主要功能
 
@@ -29,7 +31,7 @@
 ./gradlew :shared:testDebugUnitTest :common:testDebugUnitTest :mobile:lintDebug :mobile:assembleDebug
 ```
 
-调试包名为 `com.shihab.diplay.tang21test`，应用名称为BYD Carplay，版本代码105。源码／CI构建不包含独立CarPlay连接所需的认证身份；本机独立构建需要用 `DIPLAY_AUTH_ASSETS_DIR` 显式提供外部运行时资产，更新既有安装还需要相同的Android签名。认证文件、签名密钥和密码不提交进Git。
+调试包名为 `com.shihab.diplay.tang21test`，应用名称为BYD Carplay，本候选版本代码106。源码／CI构建不包含独立CarPlay连接所需的认证身份；本机独立构建需要用 `DIPLAY_AUTH_ASSETS_DIR` 显式提供外部运行时资产，更新既有安装还需要相同的Android签名。认证文件、签名密钥和密码不提交进Git。
 
 ## 验证与边界
 

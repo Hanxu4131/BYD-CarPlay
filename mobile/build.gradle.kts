@@ -17,8 +17,8 @@ android {
         applicationId = "com.shihab.diplay"
         minSdk = 28
         targetSdk = 37
-        versionCode = 105
-        versionName = "1.0.13"
+        versionCode = 106
+        versionName = "1.0.14"
 
     }
 
@@ -60,7 +60,7 @@ android {
 
 androidComponents {
     onVariants(selector().withBuildType("debug")) { variant ->
-        variant.outputs.forEach { output -> output.versionCode.set(105) }
+        variant.outputs.forEach { output -> output.versionCode.set(106) }
     }
 }
 

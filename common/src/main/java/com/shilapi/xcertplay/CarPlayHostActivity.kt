@@ -3740,6 +3740,7 @@ class CarPlayHostActivity : ComponentActivity() {
         if (size == activeDisplaySize && !displayLayoutChanged()) {
             pendingDisplaySize = null
             rememberStableAdaptiveSize(size)
+            alignAdaptiveAreaIfNeeded(size)
             return
         }
         pendingDisplaySize = size
@@ -3748,10 +3749,14 @@ class CarPlayHostActivity : ComponentActivity() {
 
     private fun applyDisplaySize(size: DisplaySize) {
         val display = sessionDisplay
-        prepareAdaptiveResize(size)
         applyFullscreenMode()
         val layoutChanged = displayLayoutChanged() && sink?.adaptiveSelection == null
-        if (shuttingDown.get() || (size == activeDisplaySize && !layoutChanged)) return
+        if (shuttingDown.get()) return
+        if (size == activeDisplaySize && !layoutChanged) {
+            alignAdaptiveAreaIfNeeded(size)
+            return
+        }
+        prepareAdaptiveResize(size)
         val previous = activeDisplaySize
         activeDisplaySize = size
         recordDetectedMaximum(size)
@@ -3877,6 +3882,23 @@ class CarPlayHostActivity : ComponentActivity() {
                 appendLog("Adaptive H264: transition fallback after 6s")
             }
         }, 6000)
+    }
+
+    private fun alignAdaptiveAreaIfNeeded(size: DisplaySize) {
+        val selection = sink?.adaptiveSelection ?: return
+        if (!selection.h264 || activeAirPlaySession == null) return
+        val width = (size.width.toLong() * selection.canvasWidth / selection.sourceWidth).toInt()
+        val height = (size.height.toLong() * selection.canvasHeight / selection.sourceHeight).toInt()
+        val index = selection.areas.indexOfFirst {
+            kotlin.math.abs(it.width - width) <= 2 && kotlin.math.abs(it.height - height) <= 2
+        }
+        if (index < 0 || selection.confirmed?.matches(selection.areas[index]) == true) return
+        // A handoff can set the host size before the phone has selected that area.
+        // Once this host has selected it, keep the existing bounded request series.
+        val epoch = adaptiveRequestEpoch
+        if (lastAdaptiveAreaIndex == index && epoch != null && selection.current(index, epoch)) return
+        requestAdaptiveArea(size)
+        videoView?.let { updateVideoLayout(it.width, it.height) }
     }
 
     private fun requestAdaptiveArea(size: DisplaySize) {
