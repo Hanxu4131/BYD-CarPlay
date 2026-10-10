@@ -38,21 +38,37 @@ import java.util.concurrent.TimeUnit
 internal class AudioFocusCoordinator(
     context: Context?,
     private val enabled: Boolean,
+    private val muteMediaOnTransientLoss: Boolean = true,
     private val report: (String) -> Unit = {},
 ) {
-    private data class Entry(val channel: AudioChannel, val attributes: AudioAttributes)
+    private data class Entry(val channel: AudioChannel, val attributes: AudioAttributes, var appliedVolume: Float = FULL_VOLUME)
 
     private val manager = context?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
     private val active = LinkedHashMap<AudioTrack, Entry>()
     private var request: AudioFocusRequest? = null
     private var requestedChannel: AudioChannel? = null
-    private val listener = AudioManager.OnAudioFocusChangeListener { change ->
+    private var mediaVolume = FULL_VOLUME
+    private var closed = false
+    private var focusGeneration = 0L
+    private var currentListener = listenerFor(focusGeneration)
+    internal val listener: AudioManager.OnAudioFocusChangeListener get() = currentListener
+
+    private fun listenerFor(generation: Long) = AudioManager.OnAudioFocusChangeListener { change ->
         synchronized(this) {
+            // Android may have queued callbacks before a request was abandoned or replaced.
+            if (generation != focusGeneration || request == null || active.isEmpty()) return@synchronized
             runCatching { report("Audio: focus change=$change activeTracks=${active.size}") }
             when (change) {
-                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> setVolume(DUCKED_VOLUME)
-                AudioManager.AUDIOFOCUS_GAIN -> setVolume(FULL_VOLUME)
-                // Keep CarPlay audio running on permanent or transient loss. Some head units
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> setMediaVolume(DUCKED_VOLUME)
+                AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                    if (muteMediaOnTransientLoss) {
+                        // This reports a temporary Android focus owner, not a confirmed call.
+                        Log.i(TAG, "Audio: muting media during transient focus loss")
+                        setMediaVolume(0f)
+                    }
+                }
+                AudioManager.AUDIOFOCUS_GAIN -> setMediaVolume(FULL_VOLUME)
+                // Keep CarPlay audio running on permanent loss. Some head units
                 // do not send a later gain callback after taking focus back.
             }
         }
@@ -60,9 +76,10 @@ internal class AudioFocusCoordinator(
 
     @Synchronized
     fun acquire(track: AudioTrack, channel: AudioChannel, attributes: AudioAttributes) {
-        if (!enabled || manager == null || channel == AudioChannel.NAVIGATION) return
+        if (closed || !enabled || manager == null || channel == AudioChannel.NAVIGATION) return
         active[track] = Entry(channel, attributes)
         refreshRequest()
+        applyMediaVolume(track, active.getValue(track))
     }
 
     @Synchronized
@@ -70,15 +87,32 @@ internal class AudioFocusCoordinator(
         if (active.remove(track) != null) refreshRequest()
     }
 
+    fun onExternalFocusChange(change: Int) {
+        val current = synchronized(this) { currentListener }
+        current.onAudioFocusChange(change)
+    }
+
+    @Synchronized
+    fun close() {
+        if (closed) return
+        closed = true
+        active.clear()
+        refreshRequest()
+    }
+
     private fun refreshRequest() {
         val primary = active.values.maxByOrNull { it.channel.focusPriority() }
         if (primary == null) {
-            request?.let { manager?.abandonAudioFocusRequest(it) }
+            focusGeneration += 1
+            val abandoned = request
             request = null
             requestedChannel = null
+            mediaVolume = FULL_VOLUME
+            abandoned?.let { manager?.abandonAudioFocusRequest(it) }
             return
         }
         if (request != null && requestedChannel == primary.channel) return
+        focusGeneration += 1
         request?.let { manager?.abandonAudioFocusRequest(it) }
         val gain = when (primary.channel) {
             AudioChannel.MEDIA -> AudioManager.AUDIOFOCUS_GAIN
@@ -86,20 +120,31 @@ internal class AudioFocusCoordinator(
             AudioChannel.ASSISTANT -> AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK
             AudioChannel.NAVIGATION -> return
         }
+        currentListener = listenerFor(focusGeneration)
         val next = AudioFocusRequest.Builder(gain)
             .setAudioAttributes(primary.attributes)
-            .setOnAudioFocusChangeListener(listener, Handler(Looper.getMainLooper()))
+            .setOnAudioFocusChangeListener(currentListener, Handler(Looper.getMainLooper()))
             .build()
         request = next
         requestedChannel = primary.channel
         val result = manager?.requestAudioFocus(next)
+        if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) setMediaVolume(FULL_VOLUME)
         val line = "Audio: focus requested channel=${primary.channel} gain=$gain granted=$result activeTracks=${active.size}"
         Log.i(TAG, line)
         runCatching { report(line) }
     }
 
-    private fun setVolume(volume: Float) {
-        active.keys.forEach { track -> runCatching { track.setStereoVolume(volume, volume) } }
+    private fun setMediaVolume(volume: Float) {
+        mediaVolume = volume
+        active.forEach { (track, entry) -> applyMediaVolume(track, entry) }
+    }
+
+    private fun applyMediaVolume(track: AudioTrack, entry: Entry) {
+        // Telephony and assistant speech remain audible, and navigation never enters this map.
+        // This changes only the renderer's relative gain, never Android's user stream volume.
+        if (entry.channel != AudioChannel.MEDIA || entry.appliedVolume == mediaVolume) return
+        val applied = runCatching { track.setStereoVolume(mediaVolume, mediaVolume) == AudioTrack.SUCCESS }.getOrDefault(false)
+        if (applied) entry.appliedVolume = mediaVolume
     }
 
     private fun AudioChannel.focusPriority(): Int = when (this) {
@@ -130,6 +175,7 @@ class AndroidMediaSink(
     private val preferSoftwareHevcDecoder: Boolean = false,
     private val advancedAudioChannelMapping: Boolean = false,
     private val audioFocusEnabled: Boolean = false,
+    private val audioFocusAutoYield: Boolean = true,
     private val mediaChannel: Int = 0,
     private val navigationChannel: Int = 0,
     context: Context? = null,
@@ -181,8 +227,14 @@ class AndroidMediaSink(
     private val audioFocusCoordinator = AudioFocusCoordinator(
         appContext,
         audioFocusEnabled,
+        audioFocusAutoYield,
         onAudioDiagnostic,
     )
+    /** The media-key session may own Android's current focus request for this same sink. */
+    fun onMediaAudioFocusChanged(change: Int) {
+        audioFocusCoordinator.onExternalFocusChange(change)
+    }
+
     private val screenStateLock = Any()
     private val activeScreenTypes = mutableSetOf<Int>()
     private val defaultSurface = surface
@@ -209,7 +261,6 @@ class AndroidMediaSink(
     private val pendingVideoCodec = ConcurrentHashMap<Int, VideoCodec>()
     private val videoRecoveryHandlers = ConcurrentHashMap<Int, () -> Unit>()
     private val videoDiagnosticHandlers = ConcurrentHashMap<Int, (String) -> Unit>()
-    private val recoveryPending = AtomicBoolean(false)
     // Extra decoders draw the same stream on other surfaces, such as the centre card.
     private val mirrorLock = Any()
     private val mirrorSurfaces = HashMap<Pair<Int, String>, Surface>()
@@ -221,6 +272,12 @@ class AndroidMediaSink(
         Thread(task, "carplay-video-recovery").apply { isDaemon = true }
     }
 
+    private val recoveryDispatch = VideoRecoveryDispatch(
+        recoveryExecutor,
+        request = { type -> videoRecoveryHandlers[type]?.invoke() },
+        onFailure = { error -> Log.w("xcertplay-usb", "Video keyframe request failed", error) },
+    )
+
     override fun setVideoRecoveryHandler(type: Int, handler: () -> Unit) {
         videoRecoveryHandlers[type] = handler
     }
@@ -230,14 +287,7 @@ class AndroidMediaSink(
     }
 
     private fun requestVideoRecovery(type: Int) {
-        if (!recoveryPending.compareAndSet(false, true)) return
-        try {
-            recoveryExecutor.execute {
-                try { videoRecoveryHandlers[type]?.invoke() }
-                catch (error: Exception) { Log.w("xcertplay-usb", "Video keyframe request failed", error) }
-                finally { recoveryPending.set(false) }
-            }
-        } catch (_: java.util.concurrent.RejectedExecutionException) { recoveryPending.set(false) }
+        recoveryDispatch.request(type)
     }
 
     fun setSurface(type: Int, surface: Surface) {
@@ -411,6 +461,8 @@ class AndroidMediaSink(
         videoRecoveryHandlers.clear()
         videoDiagnosticHandlers.clear()
         recoveryExecutor.shutdownNow()
+        // Audio workers close asynchronously; none may reacquire focus after their sink closes.
+        audioFocusCoordinator.close()
         audioRenderers.values.forEach(AudioRenderer::close)
         audioRenderers.clear()
         val hadMedia = synchronized(mediaAudioTypes) { mediaAudioTypes.isNotEmpty().also { mediaAudioTypes.clear() } }
@@ -512,10 +564,25 @@ private class VideoDecoder(
     private var renderedFrameLogged = false
     private var submittedFrameLogged = false
     private var frameReadiness: VideoFrameReadiness? = null
+    @Volatile private var firstPresentedNotified = false
     private val readinessHandler = Handler(Looper.getMainLooper())
     private var duplicateConfigLogged = false
     private val referenceChain = VideoReferenceChain()
     private val backlogRecovery = VideoBacklogRecovery()
+    private val codecRetry = VideoCodecRetryGate()
+    private val decoderCandidates: List<VideoDecoderCandidate> by lazy {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) emptyList()
+        else runCatching {
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.filter { !it.isAlias }.map {
+                VideoDecoderCandidate(it.name, it.supportedTypes.toList(), it.isEncoder,
+                    it.isHardwareAccelerated, it.isSoftwareOnly)
+            }
+        }.getOrElse {
+            Log.w(TAG, "video decoder enumeration unavailable; retaining compatibility selection", it)
+            emptyList()
+        }
+    }
+    private val warmRecovery = VideoWarmRecovery()
     private val frameTiming = VideoFrameTiming()
     private var lastKeyFrameRequestNs = 0L
     // The main screen keeps the historical log format; other screens are labelled.
@@ -557,20 +624,31 @@ private class VideoDecoder(
                             )
                             if (overloaded) {
                                 queue.recordStaleRecovery()
-                                recover("video backlog kept growing or exceeded hard limit")
+                                recover("video backlog kept growing or exceeded hard limit", queueRecovery = true)
                             } else feed(job.nalus, job.receivedNs)
                         }
                         is VideoJob.SurfaceChanged -> changeSurface(job.surface)
-                        is VideoJob.Resync -> recover("video queue overflow")
+                        is VideoJob.Resync -> recover("video queue overflow", queueRecovery = true)
                         null -> Unit
                     }
                     decoder?.let(::drainOutput)
+                    if (warmRecovery.timedOut(System.nanoTime())) {
+                        recover("warm decoder recovery produced no picture")
+                    }
                     stats.logIfDue()?.let { report(it + " " + queue.takeDiagnostics()) }
                     if (referenceChain.needsKeyFrame && lastConfig != null && outputSurface != null) requestKeyFrameIfDue()
                 } catch (error: Exception) {
                     if (running) Log.e(TAG, "video decoder job failed: ${job?.javaClass?.simpleName}", error)
-                    if (running) report("decoder error ${error.javaClass.simpleName}; waiting for keyframe")
-                    releaseDecoder()
+                    val resourceUnavailable = error is MediaCodec.CodecException &&
+                        VideoCodecFailurePolicy.resourceUnavailable(error.errorCode)
+                    if (resourceUnavailable) {
+                        val delayMs = codecRetry.failed(System.nanoTime())
+                        if (running) report("decoder resource unavailable code=${(error as MediaCodec.CodecException).errorCode}; retryAfterMs=$delayMs")
+                    } else {
+                        val delayMs = if (decoder != null && codecRetry.awaitingPicture) codecRetry.failed(System.nanoTime()) else 0L
+                        if (running) report("decoder error ${error.javaClass.simpleName}; waiting for keyframe retryAfterMs=$delayMs")
+                    }
+                    releaseDecoder(resourceUnavailable)
                     queue.discardCurrentChain()
                     referenceChain.reset()
                     requestKeyFrameIfDue()
@@ -596,6 +674,7 @@ private class VideoDecoder(
             return
         }
         lastConfig = config
+        if (!codecRetry.canRetry(System.nanoTime())) return
         duplicateConfigLogged = false
         releaseDecoder()
         referenceChain.reset()
@@ -614,20 +693,19 @@ private class VideoDecoder(
                 pps.takeIf { it.isNotEmpty() }?.let { START_CODE + it },
             )
         }
-        // Some vendor decoders (e.g. MediaTek c2.mtk.avc.decoder) reject the tuned
-        // parameters with BAD_VALUE. Fall back to a minimal format, then to software.
-        val attempts = listOf(
-            DecoderAttempt(codecName = null, tuned = true),
-            DecoderAttempt(codecName = null, tuned = false),
-        ) + softwareDecoderName(mime)?.let { listOf(DecoderAttempt(it, tuned = false)) }.orEmpty()
+        val plan = VideoDecoderSelection.plan(mime, decoderCandidates, preferSoftwareHevcDecoder)
+        if (plan.hardwareOnly) {
+            Log.i(TAG, "video decoder hardware-only candidates=${plan.attempts.mapNotNull { it.codecName }.distinct()} mime=$mime")
+        }
         var next: MediaCodec? = null
-        for (attempt in attempts) {
+        for (attempt in plan.attempts) {
             next = tryConfigure(mime, csd, surface, attempt)
             if (next != null) break
         }
         if (next == null) {
             queue.discardCurrentChain()
-            report("decoder configuration failed mime=$mime size=${config.codedWidth ?: width}x${config.codedHeight ?: height}")
+            val delayMs = codecRetry.failed(System.nanoTime())
+            report("decoder configuration failed mime=$mime size=${config.codedWidth ?: width}x${config.codedHeight ?: height}; hardwareOnly=${plan.hardwareOnly} softwareFallback=${!plan.hardwareOnly} retryAfterMs=$delayMs")
         }
         decoder = next
         renderedFrameLogged = false
@@ -646,8 +724,6 @@ private class VideoDecoder(
         }
     }
 
-    private data class DecoderAttempt(val codecName: String?, val tuned: Boolean)
-
     private fun buildFormat(mime: String, csd: List<ByteArray>, tuned: Boolean): MediaFormat =
         MediaFormat.createVideoFormat(mime, lastConfig?.codedWidth ?: width, lastConfig?.codedHeight ?: height).apply {
             if (tuned) {
@@ -661,7 +737,7 @@ private class VideoDecoder(
         mime: String,
         csd: List<ByteArray>,
         surface: Surface,
-        attempt: DecoderAttempt,
+        attempt: VideoDecoderAttempt,
     ): MediaCodec? {
         var candidate: MediaCodec? = null
         var codecName = attempt.codecName ?: "default"
@@ -721,24 +797,18 @@ private class VideoDecoder(
             runCatching { candidate?.release() }.onFailure {
                 Log.w(TAG, "video decoder candidate release failed name=$codecName", it)
             }
+            // Continue only within the selected plan. Resource loss returns to the
+            // worker cooldown instead of immediately reallocating another codec.
+            if (error is MediaCodec.CodecException &&
+                VideoCodecFailurePolicy.resourceUnavailable(error.errorCode)) throw error
             null
         }
     }
 
-    private fun softwareDecoderName(mime: String): String? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
-        return MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
-            !it.isEncoder && it.isSoftwareOnly && mime in it.supportedTypes
-        }?.name
-    }
-
     private fun createDecoder(mime: String): MediaCodec {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
-            mime == MediaFormat.MIMETYPE_VIDEO_HEVC &&
-            preferSoftwareHevcDecoder
-        ) {
-            val software = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos.firstOrNull {
-                !it.isEncoder && it.isSoftwareOnly && mime in it.supportedTypes
+        if (mime == MediaFormat.MIMETYPE_VIDEO_HEVC && preferSoftwareHevcDecoder) {
+            val software = decoderCandidates.firstOrNull {
+                !it.encoder && it.software && mime in it.supportedTypes
             }
             if (software != null) {
                 try {
@@ -772,6 +842,8 @@ private class VideoDecoder(
                 Log.i(TAG, "video decoder output surface updated")
                 return
             } catch (error: Exception) {
+                if (error is MediaCodec.CodecException &&
+                    VideoCodecFailurePolicy.resourceUnavailable(error.errorCode)) throw error
                 Log.w(TAG, "video decoder output surface update failed; reconfiguring", error)
             }
         }
@@ -784,6 +856,7 @@ private class VideoDecoder(
     private fun feed(nalus: ByteArray, receivedNs: Long) {
         val config = lastConfig ?: return
         if (outputSurface == null) return
+        if (decoder == null && !codecRetry.canRetry(System.nanoTime())) return
         val annexB = MediaCodecSupport.toAnnexB(nalus)
         if (annexB.isEmpty()) { recover("invalid video access unit"); return }
         if (!referenceChain.accepts(annexB, config.codec)) {
@@ -833,10 +906,40 @@ private class VideoDecoder(
         drainOutput(codec)
     }
 
-    private fun recover(reason: String) {
+    private fun recover(reason: String, queueRecovery: Boolean = false) {
         Log.w(TAG, "Video recovery: $reason; waiting for keyframe")
         stats.onRecovery()
         report("recovery: $reason; waiting for keyframe")
+        val codec = decoder
+        val surface = outputSurface
+        if (codec != null && surface != null && warmRecovery.canFlush(
+                queueRecovery, surface.isValid, lastConfig != null, !codecRetry.awaitingPicture,
+            )) {
+            try {
+                // Only a codec with picture output may keep its CSD through flush.
+                // This decoder uses synchronous dequeue; it does not need start() after flush.
+                frameTiming.reset()
+                codec.flush()
+                warmRecovery.flushed(System.nanoTime())
+                backlogRecovery.reset()
+                queue.discardCurrentChain()
+                referenceChain.reset()
+                // Preserve completed mirror readiness, but bind timing to a fresh epoch.
+                listenForPresentedFrames(codec, surface, preserveFirstPresented = true)
+                report("warm decoder recovery flushed; waiting for fresh keyframe")
+                requestKeyFrameIfDue()
+                return
+            } catch (error: Exception) {
+                if (error is MediaCodec.CodecException &&
+                    VideoCodecFailurePolicy.resourceUnavailable(error.errorCode)) throw error
+                Log.w(TAG, "video warm recovery failed; rebuilding decoder", error)
+                report("warm decoder recovery failed ${error.javaClass.simpleName}; rebuilding")
+            }
+        }
+        if (decoder != null && codecRetry.awaitingPicture) {
+            val delayMs = codecRetry.failed(System.nanoTime())
+            report("decoder recovery produced no picture; retryAfterMs=$delayMs")
+        }
         // Recreate with codec-specific data: flush can discard CSD before the first output.
         releaseDecoder()
         queue.discardCurrentChain()
@@ -846,6 +949,7 @@ private class VideoDecoder(
 
     private fun requestKeyFrameIfDue() {
         val now = System.nanoTime()
+        if (!codecRetry.canRetry(now)) return
         if (lastKeyFrameRequestNs != 0L && now - lastKeyFrameRequestNs < 1_000_000_000L) return
         lastKeyFrameRequestNs = now
         requestKeyFrame()
@@ -866,6 +970,10 @@ private class VideoDecoder(
                         frameTiming.released(info.presentationTimeUs, System.nanoTime())
                     } else null
                     codec.releaseOutputBuffer(index, render)
+                    if (render && picture) {
+                        codecRetry.pictureDecoded()
+                        warmRecovery.pictureDecoded()
+                    }
                     if (render && picture) frameReadiness?.let { readiness ->
                         if (readiness.outputReleased()) {
                             // Some car decoders never emit OnFrameRendered. Confirm submitted picture
@@ -889,18 +997,18 @@ private class VideoDecoder(
         }
     }
 
-    private fun listenForPresentedFrames(codec: MediaCodec, surface: Surface) {
+    private fun listenForPresentedFrames(codec: MediaCodec, surface: Surface, preserveFirstPresented: Boolean = false) {
         val epoch = frameTiming.reset()
         val readiness = frameReadiness
-        var presentedNotified = false
+        if (!preserveFirstPresented) firstPresentedNotified = false
         runCatching {
             codec.setOnFrameRenderedListener({ renderedCodec, ptsUs, renderedNs ->
                 if (running && renderedCodec === codec && decoder === codec &&
                     outputSurface === surface && surface.isValid && frameTiming.isCurrent(epoch)) {
                     frameTiming.presented(epoch, ptsUs, renderedNs)?.let(stats::onPresented)
                     readiness?.codecRendered()
-                    if (!presentedNotified) {
-                        presentedNotified = true
+                    if (!firstPresentedNotified) {
+                        firstPresentedNotified = true
                         onFirstFramePresented?.invoke()
                     }
                 }
@@ -929,18 +1037,21 @@ private class VideoDecoder(
     }
 
     @Synchronized
-    private fun releaseDecoder() {
+    private fun releaseDecoder(resourceUnavailable: Boolean = false) {
         backlogRecovery.reset()
+        warmRecovery.reset()
         frameTiming.reset()
         frameReadiness = null
         val codec = decoder
         decoder = null
         if (codec != null) {
             val name = runCatching { codec.name }.getOrDefault("unknown")
-            try {
-                codec.stop()
-            } catch (error: Exception) {
-                Log.w(TAG, "video decoder stop failed name=$name", error)
+            if (!resourceUnavailable) {
+                try {
+                    codec.stop()
+                } catch (error: Exception) {
+                    Log.w(TAG, "video decoder stop failed name=$name", error)
+                }
             }
             try {
                 codec.release()
@@ -978,6 +1089,20 @@ private fun MediaFormat.intOrNull(key: String): Int? =
         }
     }
 
+/** A failure-safe snapshot of AudioTrack playback parameters for low-frequency diagnostics. */
+internal data class PlaybackParamsSnapshot(val speed: Float?, val pitch: Float?) {
+    companion object {
+        fun capture(read: () -> Pair<Float, Float>): PlaybackParamsSnapshot =
+            runCatching(read).fold(
+                onSuccess = { PlaybackParamsSnapshot(it.first, it.second) },
+                onFailure = { PlaybackParamsSnapshot(null, null) },
+            )
+    }
+
+    fun logFields(): String =
+        "playbackSpeed=${speed ?: "unavailable"} playbackPitch=${pitch ?: "unavailable"}"
+}
+
 /** Decodes AAC-LC/Opus to PCM and plays it, or plays wired LPCM directly. */
 private class AudioRenderer(
     val format: AudioFormat,
@@ -991,11 +1116,12 @@ private class AudioRenderer(
     private val report: (String) -> Unit,
     private val ambientSinkToken: Long,
 ) : Closeable {
-    private data class AudioPacket(val rtp: ByteArray, val sample: Int)
+    private data class AudioPacket(val rtp: ByteArray, val sample: Int, val arrivalNanos: Long)
 
     private var trackAttributes: AudioAttributes? = null
     private var mappedChannel: AudioChannel? = null
     private val navigationPlaybackToken = NavigationPlayback.open()
+    private val voicePlaybackActivity = VoicePlaybackActivity()
     private var actualLegacyStreamType: Int? = null
     private val queue = LinkedBlockingQueue<AudioPacket>(MAX_QUEUED_PACKETS)
     @Volatile private var running = true
@@ -1010,11 +1136,15 @@ private class AudioRenderer(
     private var fadeApplied = false
     private var droppedPacketsLogged = false
     private var firstAacPayloadLogged = false
+    private var aacOutputFormatLogged = false
     private var firstOpusShortPacketLogged = false
     private var firstInputQueuedLogged = false
     private var inputQueued = 0
     private var inputDropped = 0
     private var inputRetried = 0L
+    private val pendingInput = PendingAudioInput()
+    private var inputWaitTimeouts = 0L
+    private var inputWaitExpired = 0L
     private var outputBuffers = 0
     private var firstPcmLogged = false
     private val packetsReceived = AtomicInteger()
@@ -1040,6 +1170,7 @@ private class AudioRenderer(
     private var underrunsAtPlaybackStart = 0
     private var lastPcmWriteNs = 0L
     private var rebufferCount = 0
+    private val recoveryDiagnostics = MediaAudioRecoveryDiagnostics()
     private val thread = Thread(::run, "carplay-audio").apply { isDaemon = true }
 
     fun start() {
@@ -1049,13 +1180,14 @@ private class AudioRenderer(
     }
 
     fun submit(rtp: ByteArray, sample: Int) {
+        if (!running) return
         if (started) {
             packetsReceived.incrementAndGet()
             val now = System.nanoTime()
             val previous = lastArrivalNs.getAndSet(now)
             if (previous != 0L) maxArrivalGapMs.accumulateAndGet((now - previous) / 1_000_000L, ::maxOf)
         }
-        if (!started || !queue.offer(AudioPacket(rtp, sample))) {
+        if (!started || !queue.offer(AudioPacket(rtp, sample, System.nanoTime()))) {
             if (started) packetsDropped.incrementAndGet()
             if (started && !droppedPacketsLogged) {
                 droppedPacketsLogged = true
@@ -1066,10 +1198,12 @@ private class AudioRenderer(
     }
 
     fun priorityVoiceActive(): Boolean = running && playbackStarted &&
-        (mappedChannel == AudioChannel.PHONE || mappedChannel == AudioChannel.ASSISTANT)
+        (mappedChannel == AudioChannel.PHONE || mappedChannel == AudioChannel.ASSISTANT) &&
+        voicePlaybackActivity.active()
 
     override fun close() {
         running = false
+        voicePlaybackActivity.close()
         AmbientMusicController.closeRenderer(ambientRendererToken)
         NavigationPlayback.close(navigationPlaybackToken)
         thread.interrupt()
@@ -1090,7 +1224,13 @@ private class AudioRenderer(
             createTrack()
             requestAudioFocus()
             while (running) {
-                queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::handle)
+                // Finish the held access unit before taking another packet. Retry the last
+                // unit even when no new UDP packet arrives.
+                if (pendingInput.current != null) {
+                    pumpCodecInput()
+                } else {
+                    queue.poll(AUDIO_POLL_MILLIS, TimeUnit.MILLISECONDS)?.let(::handle)
+                }
                 // Output becomes ready asynchronously, including after the last packet of a burst.
                 // Waiting for the next UDP packet can strand decoded sound for hundreds of ms.
                 codec?.let(::drainCodec)
@@ -1105,7 +1245,12 @@ private class AudioRenderer(
                 report("Audio: renderer failed audioType=${format.audioType} error=${error.javaClass.simpleName}")
             }
         } finally {
+            running = false
+            playbackStarted = false
+            voicePlaybackActivity.close()
             runCatching { logStatsIfDue(force = true) }
+            pendingInput.clear()
+            queue.clear()
             release()
         }
     }
@@ -1386,6 +1531,7 @@ private class AudioRenderer(
                     feedCodec(
                         MediaCodecSupport.adtsFrame(accessUnit, format.sampleRate, format.channels),
                         timestampUs,
+                        packet.arrivalNanos,
                     )
                 }
             }
@@ -1402,7 +1548,7 @@ private class AudioRenderer(
                     }
                     return
                 }
-                feedCodec(accessUnit, timestampUs)
+                feedCodec(accessUnit, timestampUs, packet.arrivalNanos)
             }
         }
     }
@@ -1410,8 +1556,22 @@ private class AudioRenderer(
     private fun sampleTimestampUs(sample: Int): Long =
         (sample.toLong() and 0xffff_ffffL) * 1_000_000L / format.sampleRate
 
-    private fun feedCodec(payload: ByteArray, presentationTimeUs: Long) {
+    private fun feedCodec(payload: ByteArray, presentationTimeUs: Long, arrivalNanos: Long) {
+        if (codec == null || !running) return
+        pendingInput.offer(payload, presentationTimeUs, arrivalNanos, System.nanoTime())
+        pumpCodecInput()
+    }
+
+    private fun pumpCodecInput() {
         val codec = codec ?: return
+        val unit = pendingInput.current ?: return
+        if (!running) return
+        // A later pump must not revive an access unit beyond its retry window.
+        if (pendingInput.unavailable(System.nanoTime())) {
+            inputWaitExpired++
+            inputDropped++
+            return
+        }
         val index = CodecInputRetry.acquire(
             dequeue = { codec.dequeueInputBuffer(INPUT_TIMEOUT_US) },
             drain = { drainCodec(codec) },
@@ -1419,8 +1579,13 @@ private class AudioRenderer(
             onRetry = { inputRetried++ },
         )
         if (index < 0) {
-            inputDropped++
-            if (inputDropped == 1) {
+            if (!running) return
+            inputWaitTimeouts++
+            if (pendingInput.unavailable(System.nanoTime())) {
+                inputWaitExpired++
+                inputDropped++
+            }
+            if (inputDropped == 1 && pendingInput.current == null) {
                 Log.w(
                     TAG,
                     "audio decoder input unavailable codec=${format.codec} " +
@@ -1429,11 +1594,17 @@ private class AudioRenderer(
             }
             return
         }
-        val input = codec.getInputBuffer(index) ?: return
+        if (!running) return
+        val input = codec.getInputBuffer(index) ?: run {
+            pendingInput.clear()
+            inputDropped++
+            return
+        }
+        val payload = unit.payload
         input.clear()
         if (payload.size <= input.remaining()) {
             input.put(payload)
-            codec.queueInputBuffer(index, 0, payload.size, presentationTimeUs, 0)
+            codec.queueInputBuffer(index, 0, payload.size, unit.presentationTimeUs, 0)
             inputQueued++
             if (!firstInputQueuedLogged) {
                 firstInputQueuedLogged = true
@@ -1447,6 +1618,7 @@ private class AudioRenderer(
             codec.queueInputBuffer(index, 0, 0, 0, 0)
             inputDropped++
         }
+        pendingInput.clear()
         drainCodec(codec)
     }
 
@@ -1456,7 +1628,23 @@ private class AudioRenderer(
             val index = codec.dequeueOutputBuffer(info, 0)
             when {
                 index == MediaCodec.INFO_TRY_AGAIN_LATER -> return
-                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> Unit
+                index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    if (format.codec == AudioCodecKind.AAC_LC && !aacOutputFormatLogged) {
+                        aacOutputFormatLogged = true
+                        val outputFormat = runCatching { codec.outputFormat }.getOrNull()
+                        if (outputFormat == null) {
+                            Log.w(TAG, "audio decoder output format unavailable codec=${format.codec}")
+                        } else {
+                            Log.i(
+                                TAG,
+                                "audio decoder output format codec=${format.codec} " +
+                                    "negotiatedSampleRate=${format.sampleRate} negotiatedChannels=${format.channels} " +
+                                    "actualSampleRate=${outputFormat.intOrNull(MediaFormat.KEY_SAMPLE_RATE) ?: -1} " +
+                                    "actualChannels=${outputFormat.intOrNull(MediaFormat.KEY_CHANNEL_COUNT) ?: -1}",
+                            )
+                        }
+                    }
+                }
                 index >= 0 -> {
                     val size = info.size
                     val ownedPcm = DecodedAudioPcm.copyAndRelease(
@@ -1534,7 +1722,10 @@ private class AudioRenderer(
             writtenFramesThisWindow += framesWritten
             bufferProgress.written(count)
             lastPcmWriteNs = System.nanoTime()
-            if (playbackStarted) reportNavigationPlayback(track)
+            if (playbackStarted) {
+                reportNavigationPlayback(track)
+                reportPriorityVoicePlayback(track)
+            }
             if (!playbackStarted) {
                 prebufferBytes += count
                 if (prebufferBytes >= startThresholdBytes) {
@@ -1546,10 +1737,25 @@ private class AudioRenderer(
     }
 
     private fun startPlayback(track: AudioTrack) {
-        underrunsAtPlaybackStart = track.underrunCount
+        val underruns = track.underrunCount
+        val recoveryUnderruns = underruns - underrunsAtPlaybackStart
+        underrunsAtPlaybackStart = underruns
         track.play()
         playbackStarted = true
+        reportMediaRecovery(track, resumed = true, remainingPcmBytes = prebufferBytes.toLong(),
+            underrunDelta = recoveryUnderruns)
         reportNavigationPlayback(track)
+        reportPriorityVoicePlayback(track)
+    }
+
+    private fun reportPriorityVoicePlayback(track: AudioTrack) {
+        if (!running || (mappedChannel != AudioChannel.PHONE && mappedChannel != AudioChannel.ASSISTANT)) return
+        // A retained voice stream is active only while its written PCM can still be playing.
+        val bufferedMillis = runCatching {
+            val pendingFrames = bufferProgress.queuedBytes(track.playbackHeadPosition) / frameBytes
+            (pendingFrames * 1000L + format.sampleRate - 1L) / format.sampleRate
+        }.getOrDefault(0L)
+        voicePlaybackActivity.played(bufferedMillis)
     }
 
     private fun reportNavigationPlayback(track: AudioTrack) {
@@ -1565,18 +1771,43 @@ private class AudioRenderer(
     private fun maintainPlaybackBuffer() {
         val track = track ?: return
         if (bufferProgress.shouldRebuffer(mappedChannel == AudioChannel.MEDIA, playbackStarted,
-                track.underrunCount > underrunsAtPlaybackStart, queue.isEmpty(), track.playbackHeadPosition)) {
-            // The hardware buffer has actually drained. Pause without flushing or discarding PCM,
-            // then use the configured start threshold again when music resumes.
+                track.underrunCount > underrunsAtPlaybackStart, queue.isEmpty(), track.playbackHeadPosition,
+                startThresholdBytes / 2L)) {
+            // The hardware buffer has starved below the recovery floor. Pause without flushing
+            // or discarding PCM, then use the configured start threshold again when music resumes.
             track.pause()
             playbackStarted = false
-            prebufferBytes = 0
+            // Pausing retains queued PCM. Count it toward the restart threshold so a
+            // blocking write cannot fill the paused track before we call play().
+            prebufferBytes = bufferProgress.queuedBytes(track.playbackHeadPosition)
+                .coerceAtMost(startThresholdBytes.toLong()).toInt()
+            lastPcmWriteNs = System.nanoTime()
             rebufferCount++
+            reportMediaRecovery(track, resumed = false, remainingPcmBytes = prebufferBytes.toLong(),
+                underrunDelta = null)
         }
         // A short final burst may never reach the start threshold. Play it after a bounded wait.
         if (!playbackStarted && prebufferBytes > 0 && queue.isEmpty() &&
             System.nanoTime() - lastPcmWriteNs >= BUFFER_TAIL_WAIT_NS) {
             startPlayback(track)
+        }
+    }
+
+    private fun reportMediaRecovery(track: AudioTrack, resumed: Boolean,
+        remainingPcmBytes: Long, underrunDelta: Int?) {
+        if (mappedChannel != AudioChannel.MEDIA || (resumed && !recoveryDiagnostics.isPaused)) return
+        // Diagnostics must not interrupt playback on a ROM with unusual track getters.
+        runCatching {
+            val snapshot = MediaAudioRecoveryDiagnostics.Snapshot(
+                System.nanoTime(), track.playbackHeadPosition, remainingPcmBytes, frameBytes,
+                queue.size, pendingInput.current != null,
+                underrunDelta ?: (track.underrunCount - underrunsAtPlaybackStart), lastArrivalNs.get(),
+            )
+            val line = if (resumed) recoveryDiagnostics.resumed(snapshot) else recoveryDiagnostics.paused(snapshot)
+            if (line != null) {
+                Log.i(STATS_TAG, line)
+                report(line)
+            }
         }
     }
 
@@ -1588,6 +1819,14 @@ private class AudioRenderer(
         val underruns = track?.underrunCount ?: 0
         val lastRx = lastArrivalNs.get()
         val currentTrack = track
+        val playbackParams = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && currentTrack != null) {
+            PlaybackParamsSnapshot.capture {
+                val params = currentTrack.playbackParams
+                params.speed to params.pitch
+            }
+        } else {
+            PlaybackParamsSnapshot(null, null)
+        }
         val playbackHeadFrames = currentTrack?.playbackHeadPosition
             ?.toLong()?.and(0xffff_ffffL)
         val playbackAdvanceFrames = playbackHeadFrames?.let { current ->
@@ -1596,10 +1835,14 @@ private class AudioRenderer(
             previous?.let { (current - it) and 0xffff_ffffL }
         }
         val queuedFrames = playbackHeadFrames?.let { (totalWrittenFrames - it).coerceAtLeast(0L) }
+        val oldestArrival = listOfNotNull(pendingInput.current?.arrivalNanos, queue.peek()?.arrivalNanos).minOrNull()
+        val oldestPacketAgeMs = oldestArrival?.let { ((now - it) / 1_000_000L).coerceAtLeast(0L) } ?: -1L
         val line = "audio stats audioType=${format.audioType} channel=$mappedChannel " +
             "routeType=${currentTrack?.routedDevice?.type ?: -1} codec=${format.codec} " +
             "trackState=${currentTrack?.state ?: -1} playState=${currentTrack?.playState ?: -1} " +
             "sampleRate=${currentTrack?.sampleRate ?: format.sampleRate} " +
+            "trackSampleRate=${currentTrack?.sampleRate ?: -1} negotiatedSampleRate=${format.sampleRate} " +
+            "${playbackParams.logFields()} " +
             "trackBufferFrames=${currentTrack?.bufferSizeInFrames ?: -1} " +
             "rx=${packetsReceived.getAndSet(0)} " +
             "dropped=${packetsDropped.getAndSet(0)} underruns=+${underruns - statsLastUnderruns} queue=${queue.size} " +
@@ -1610,7 +1853,10 @@ private class AudioRenderer(
             "estimatedQueuedFrames=${queuedFrames ?: -1} writeErrors=$writeErrorsThisWindow " +
             "lastWriteError=${lastWriteErrorCode ?: "none"} zeroWrites=$zeroWritesThisWindow " +
             "partialWrites=$partialWritesThisWindow " +
-            "decoderDroppedTotal=$inputDropped decoderInputRetriesTotal=$inputRetried outputBuffersTotal=$outputBuffers rebuffers=$rebufferCount ended=$force"
+            "decoderDroppedTotal=$inputDropped decoderInputRetriesTotal=$inputRetried " +
+            "decoderInputWaitTimeoutsTotal=$inputWaitTimeouts decoderInputWaitExpiredTotal=$inputWaitExpired " +
+            "pendingInput=${if (pendingInput.current == null) 0 else 1} oldestPacketAgeMs=$oldestPacketAgeMs " +
+            "outputBuffersTotal=$outputBuffers rebuffers=$rebufferCount ended=$force"
         Log.i(STATS_TAG, line)
         report(line)
         statsLastUnderruns = underruns

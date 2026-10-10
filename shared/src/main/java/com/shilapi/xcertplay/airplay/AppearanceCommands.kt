@@ -1,6 +1,10 @@
 package com.shilapi.xcertplay.airplay
 
-internal data class CarPlayAppearance(val night: Boolean, val manual: Boolean)
+internal data class CarPlayAppearance(
+    val night: Boolean,
+    val manual: Boolean,
+    val mapFollowUi: Boolean = true,
+)
 
 /** Appearance updates use the same display UUIDs advertised in /info. */
 internal object AppearanceCommands {
@@ -20,7 +24,9 @@ internal object AppearanceCommands {
                     "params" to linkedMapOf(
                         "uuid" to uuid,
                         "appearanceMode" to if (appearance.night) 1 else 0,
-                        "appearanceSetting" to if (appearance.manual) 2 else 0,
+                        // Automatic maps retain the current mode as a seed; the phone decides subsequent changes.
+                        "appearanceSetting" to if (appearance.manual &&
+                            (type != "mapAppearanceUpdate" || appearance.mapFollowUi)) 2 else 0,
                     ),
                 )
             }

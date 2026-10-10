@@ -1,3 +1,7 @@
+# BYD CarPlay v1.0.13
+
+Complete current-source synchronization; see [v1.0.13 notes](docs/RELEASE_V1_0_13.md) and [current adaptation](docs/CURRENT_ADAPTATION.md). Original upstream history follows.
+
 # DiPlay 0.2.9 — 2026-10-02
 
 - Follow BYD head-unit day/night changes while CarPlay is visible, including firmware that does not reliably deliver Android configuration callbacks.

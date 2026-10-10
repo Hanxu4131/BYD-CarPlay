@@ -4,6 +4,56 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 
 class VoiceEffectsTest {
+    @Test fun failedNsConfirmedOffKeepsAecAndDisabledHandleUntilSessionCloses() {
+        val calls = mutableListOf<Pair<String, Boolean>>()
+        val released = mutableListOf<String>()
+        val manager = VoiceEffects<String>(configure = { effect, enabled ->
+            calls += effect to enabled
+            effect != "ns" || !enabled
+        }, release = { released += it }, report = { _, _ -> })
+        val aec = manager.configureCapture("AEC", true) { "aec" }
+        val ns = manager.configureCapture("NS", true) { "ns" }
+        assertEquals(VoiceEffectState.ENABLED, aec)
+        assertEquals(VoiceEffectState.DISABLED, ns)
+        org.junit.Assert.assertFalse(MicrophoneEffectStartup(true, true, aec, ns).needsRawFallback)
+        assertEquals(listOf("aec" to true, "ns" to true, "ns" to false), calls)
+        assertEquals(emptyList<String>(), released)
+        manager.close()
+        assertEquals(listOf("aec", "ns"), released)
+    }
+
+    @Test fun failedDisableConfirmationRequiresRawSafetyFallback() {
+        val released = mutableListOf<String>()
+        val manager = VoiceEffects<String>(configure = { effect, _ -> effect == "aec" },
+            release = { released += it }, report = { _, _ -> })
+        val aec = manager.configureCapture("AEC", true) { "aec" }
+        val ns = manager.configureCapture("NS", true) { "ns" }
+        assertEquals(VoiceEffectState.UNCONFIRMED, ns)
+        org.junit.Assert.assertTrue(MicrophoneEffectStartup(true, true, aec, ns).needsRawFallback)
+        assertEquals(listOf("ns"), released)
+        manager.close()
+        assertEquals(listOf("ns", "aec"), released)
+    }
+
+    @Test fun enableExceptionCanRecoverOnlyAfterExplicitOffConfirmation() {
+        val calls = mutableListOf<Boolean>()
+        val manager = VoiceEffects<String>(configure = { _, enabled ->
+            calls += enabled
+            if (enabled) throw IllegalStateException()
+            true
+        }, release = { }, report = { _, _ -> })
+        assertEquals(VoiceEffectState.DISABLED, manager.configureCapture("AEC", true) { "aec" })
+        assertEquals(listOf(true, false), calls)
+        manager.close()
+    }
+
+    @Test fun missingHandleDoesNotPretendFailedEffectIsOff() {
+        val manager = VoiceEffects<String>(configure = { _, _ -> true }, release = { }, report = { _, _ -> })
+        assertEquals(VoiceEffectState.UNCONFIRMED, manager.configureCapture("NS", true) { null })
+        assertEquals(VoiceEffectState.UNCONFIRMED, manager.configureCapture("AEC", true) { throw IllegalStateException() })
+        manager.close()
+    }
+
     @Test fun fallbackDisablesEveryEffectAndKeepsHandlesUntilClose() {
         val states = mutableListOf<Pair<String, Boolean>>()
         val released = mutableListOf<String>()

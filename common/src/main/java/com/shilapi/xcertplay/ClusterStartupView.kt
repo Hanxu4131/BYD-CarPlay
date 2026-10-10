@@ -5,6 +5,8 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.CornerPathEffect
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.PorterDuff
@@ -26,6 +28,24 @@ internal data class StartupArtworkBounds(val left: Float, val top: Float, val wi
             val fittedWidth = minOf(width.toFloat(), height * aspect)
             val fittedHeight = fittedWidth / aspect
             return StartupArtworkBounds((width - fittedWidth) * .5f, (height - fittedHeight) * .5f, fittedWidth, fittedHeight)
+        }
+    }
+}
+
+/** A centred stack sized by both window axes, with a square icon and the wordmark aspect preserved. */
+internal data class StandardStartupLayout(
+    val iconLeft: Float, val iconTop: Float, val iconSize: Float,
+    val logoLeft: Float, val logoTop: Float, val logoWidth: Float, val logoHeight: Float,
+) {
+    companion object {
+        fun fit(width: Float, height: Float): StandardStartupLayout {
+            val side = minOf(width * .30f, height * .40f)
+            val logoWidth = side * 1.48f
+            val logoHeight = logoWidth * 98f / 400f
+            val gap = side * .38f
+            val top = (height - side - gap - logoHeight) * .5f
+            return StandardStartupLayout((width - side) * .5f, top, side,
+                (width - logoWidth) * .5f, top + side + gap, logoWidth, logoHeight)
         }
     }
 }
@@ -59,6 +79,15 @@ internal class ClusterStartupView(
     private var sheen: LinearGradient? = null
     private var glass: LinearGradient? = null
     private val panelBounds = RectF()
+    private var standardBackground: LinearGradient? = null
+    private var standardWarmth: RadialGradient? = null
+    private var standardGlass: LinearGradient? = null
+    private var standardRim: LinearGradient? = null
+    private var standardLayout = StandardStartupLayout.fit(0f, 0f)
+    private val standardIconBounds = RectF()
+    private val standardRingBounds = RectF()
+    private val standardTriangle = Path()
+    private var standardTriangleCorners: CornerPathEffect? = null
     private var waiting = false
     val waitingForFrame: Boolean get() = waiting
     private var waitStartedAt = 0L
@@ -156,6 +185,7 @@ internal class ClusterStartupView(
         artwork = StartupArtworkBounds.fit(w, h, fixedAspectRatio)
         val w = artwork.width
         val h = artwork.height
+        configureStandardArtwork(w, h)
         val radius = maxOf(w, h) * .58f
         glow = RadialGradient(w * .5f, h * .5f, radius,
             Color.rgb(17, 24, 43), Color.rgb(3, 6, 14), Shader.TileMode.CLAMP)
@@ -179,6 +209,11 @@ internal class ClusterStartupView(
         canvas.clipRect(0f, 0f, artwork.width, artwork.height)
         val width = artwork.width
         val height = artwork.height
+        if (!ultra) {
+            drawStandardArtwork(canvas, width, height)
+            canvas.restoreToCount(content)
+            return
+        }
         paint.alpha = 255
         paint.style = Paint.Style.FILL
         paint.shader = glow
@@ -229,4 +264,69 @@ internal class ClusterStartupView(
         paint.style = Paint.Style.FILL
         canvas.restoreToCount(content)
     }
+
+    private fun configureStandardArtwork(width: Float, height: Float) {
+        standardLayout = StandardStartupLayout.fit(width, height)
+        val layout = standardLayout
+        val side = layout.iconSize
+        val x = layout.iconLeft
+        val y = layout.iconTop
+        standardIconBounds.set(x, y, x + side, y + side)
+        standardRingBounds.set(x + side * .16f, y + side * .15f,
+            x + side * .84f, y + side * .85f)
+        standardBackground = LinearGradient(0f, 0f, width, height,
+            intArrayOf(Color.rgb(51, 39, 29), Color.rgb(48, 43, 39), Color.rgb(9, 10, 18)),
+            floatArrayOf(0f, .48f, 1f), Shader.TileMode.CLAMP)
+        standardWarmth = RadialGradient(width * .94f, height * .54f, maxOf(width, height) * .85f,
+            Color.argb(70, 145, 137, 123), Color.TRANSPARENT, Shader.TileMode.CLAMP)
+        standardGlass = LinearGradient(x, y, x + side, y + side,
+            intArrayOf(Color.argb(80, 100, 91, 79), Color.argb(100, 37, 31, 27), Color.argb(90, 87, 79, 68)),
+            floatArrayOf(0f, .55f, 1f), Shader.TileMode.CLAMP)
+        standardRim = LinearGradient(x, y, x + side, y + side,
+            intArrayOf(Color.argb(225, 241, 225, 204), Color.argb(55, 166, 150, 133),
+                Color.argb(30, 117, 109, 100), Color.argb(215, 241, 225, 204)),
+            floatArrayOf(0f, .25f, .70f, 1f), Shader.TileMode.CLAMP)
+        standardTriangle.reset()
+        standardTriangle.moveTo(x + side * .43f, y + side * .36f)
+        standardTriangle.lineTo(x + side * .69f, y + side * .50f)
+        standardTriangle.lineTo(x + side * .43f, y + side * .64f)
+        standardTriangle.close()
+        standardTriangleCorners = CornerPathEffect(side * .025f)
+    }
+
+    private fun drawStandardArtwork(canvas: Canvas, width: Float, height: Float) {
+        if (standardLayout.iconSize <= 0f) return
+        paint.alpha = 255
+        paint.style = Paint.Style.FILL
+        paint.shader = standardBackground
+        canvas.drawRect(0f, 0f, width, height, paint)
+        paint.shader = standardWarmth
+        val breath = ((1 - kotlin.math.cos(phase * Math.PI * 2)) * .5).toFloat()
+        paint.alpha = (215f + 40f * breath).toInt()
+        canvas.drawRect(0f, 0f, width, height, paint)
+        paint.alpha = 255
+        val layout = standardLayout
+        val side = layout.iconSize
+        val radius = side * .24f
+        paint.shader = standardGlass
+        canvas.drawRoundRect(standardIconBounds, radius, radius, paint)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = maxOf(1f, side * .007f)
+        paint.shader = standardRim
+        canvas.drawRoundRect(standardIconBounds, radius, radius, paint)
+        paint.shader = null
+        paint.color = Color.WHITE
+        paint.strokeWidth = side * .076f
+        paint.strokeCap = Paint.Cap.ROUND
+        canvas.drawArc(standardRingBounds, 40f, 280f, false, paint)
+        paint.strokeCap = Paint.Cap.BUTT
+        paint.style = Paint.Style.FILL
+        paint.pathEffect = standardTriangleCorners
+        canvas.drawPath(standardTriangle, paint)
+        paint.pathEffect = null
+        standardLogo.setBounds(layout.logoLeft.toInt(), layout.logoTop.toInt(),
+            (layout.logoLeft + layout.logoWidth).toInt(), (layout.logoTop + layout.logoHeight).toInt())
+        standardLogo.draw(canvas)
+    }
+
 }

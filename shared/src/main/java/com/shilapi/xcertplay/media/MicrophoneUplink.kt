@@ -49,6 +49,8 @@ internal class MicrophoneUplink(
     private val captureDiagnostics = MicrophoneCaptureDiagnostics(diagnostic)
     private var thread: Thread? = null
     private var effectsRequested = false
+    private var aecState = VoiceEffectState.UNCONFIRMED
+    private var nsState = VoiceEffectState.UNCONFIRMED
     private val capturePolicy = MicrophoneCapturePolicy.from(processing)
 
     fun start(): Boolean {
@@ -121,23 +123,22 @@ internal class MicrophoneUplink(
         return try {
             // VOICE_COMMUNICATION can enable effects by default. Configure false explicitly too,
             // so the switch controls the session's Android AEC/NS rather than only our requests.
-            var aecConfigured = true
-            var nsConfigured = true
             if (capturePolicy.configureSystemEffects) {
-                aecConfigured = effects.add("AEC", capturePolicy.echoCancellation) {
+                aecState = effects.configureCapture("AEC", capturePolicy.echoCancellation) {
                     if (AcousticEchoCanceler.isAvailable()) AcousticEchoCanceler.create(nextRecorder.audioSessionId) else null
                 }
-                nsConfigured = effects.add("NS", capturePolicy.noiseSuppression) {
+                nsState = effects.configureCapture("NS", capturePolicy.noiseSuppression) {
                     if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(nextRecorder.audioSessionId) else null
                 }
             } else {
                 diagnostic("Microphone effects bypassed reason=device compatibility source=MIC; system effect handles not created")
             }
-            effectsRequested = capturePolicy.echoCancellation || capturePolicy.noiseSuppression
+            val startup = MicrophoneEffectStartup(capturePolicy.echoCancellation, capturePolicy.noiseSuppression, aecState, nsState)
+            effectsRequested = startup.hasEnabledEffect
             var captureRecorder = nextRecorder
-            if ((capturePolicy.echoCancellation && !aecConfigured) || (capturePolicy.noiseSuppression && !nsConfigured)) {
+            if (startup.needsRawFallback) {
                 effectsRequested = false
-                diagnostic("Microphone effects fallback reason=enable failed; processing disabled for this stream")
+                diagnostic("Microphone effects fallback reason=no working effect or failed effect off state unconfirmed; processing disabled for this stream")
                 captureRecorder = restartWithoutEffects(nextRecorder, channelMask, bufferSize)
                     ?: throw IllegalStateException("Microphone effects fallback recorder unavailable")
             } else {
@@ -145,7 +146,8 @@ internal class MicrophoneUplink(
                 nextRecorder.startRecording()
                 captureDiagnostics.snapshot(nextRecorder, "started")
             }
-            diagnostic("Microphone started type=${config.audioType} codec=${config.codec} rate=${config.sampleRate} channels=${config.channels} frameBytes=${config.frameBytes} frameMs=${config.frameMillis} nsRequested=${processing.noiseSuppression} aecRequested=${processing.echoCancellation} systemEffectsAllowed=${processing.systemEffectsAllowed} effectsRequested=$effectsRequested")
+            diagnostic("Microphone effect state aec=$aecState ns=$nsState startupRawFallback=${startup.needsRawFallback} partial=${!startup.needsRawFallback && startup.partial}")
+            diagnostic("Microphone started type=${config.audioType} codec=${config.codec} rate=${config.sampleRate} channels=${config.channels} frameBytes=${config.frameBytes} frameMs=${config.frameMillis} nsRequested=${processing.noiseSuppression} aecRequested=${processing.echoCancellation} systemEffectsAllowed=${processing.systemEffectsAllowed} effectsRequested=$effectsRequested aec=$aecState ns=$nsState")
             thread = Thread({ capture(captureRecorder, nextSocket, channelMask, bufferSize) }, "carplay-mic").apply {
                 isDaemon = true
                 start()
@@ -213,7 +215,7 @@ internal class MicrophoneUplink(
                 if (count == 0) {
                     val nowNs = System.nanoTime()
                     if (nowNs - lastReportNs >= 5_000_000_000L) {
-                        diagnostic("Microphone stats type=${config.audioType} reads=$reads frames=$sentFrames maxReadMs=${maxReadNs / 1_000_000} readBytes=0 ${signal.summary()} effectsRequested=$effectsRequested")
+                        diagnostic("Microphone stats type=${config.audioType} reads=$reads frames=$sentFrames maxReadMs=${maxReadNs / 1_000_000} readBytes=0 ${signal.summary()} effectsRequested=$effectsRequested aec=$aecState ns=$nsState")
                         lastReportNs = nowNs; reads = 0; sentFrames = 0; maxReadNs = 0
                     }
                     continue
@@ -230,7 +232,7 @@ internal class MicrophoneUplink(
                 }
                 val nowNs = System.nanoTime()
                 if (nowNs - lastReportNs >= 5_000_000_000L) {
-                    diagnostic("Microphone stats type=${config.audioType} reads=$reads frames=$sentFrames maxReadMs=${maxReadNs / 1_000_000} ${signal.summary()} effectsRequested=$effectsRequested")
+                    diagnostic("Microphone stats type=${config.audioType} reads=$reads frames=$sentFrames maxReadMs=${maxReadNs / 1_000_000} ${signal.summary()} effectsRequested=$effectsRequested aec=$aecState ns=$nsState")
                     lastReportNs = nowNs; reads = 0; sentFrames = 0; maxReadNs = 0
                 }
             }
@@ -269,6 +271,8 @@ internal class MicrophoneUplink(
         val nsDisabled = effects.add("NS", false) {
             if (NoiseSuppressor.isAvailable()) NoiseSuppressor.create(replacement.audioSessionId) else null
         }
+        aecState = if (aecDisabled) VoiceEffectState.DISABLED else VoiceEffectState.UNCONFIRMED
+        nsState = if (nsDisabled) VoiceEffectState.DISABLED else VoiceEffectState.UNCONFIRMED
         captureDiagnostics.beforeStart(replacement)
         replacement.startRecording()
         captureDiagnostics.snapshot(replacement, "fallback started")
@@ -287,7 +291,7 @@ internal class MicrophoneUplink(
                 socket = socket,
                 counters = counters,
                 body = body,
-                samples = config.samplesPerPacket,
+                samples = config.rtpSamplesPerPacket,
             )
         }
     }

@@ -57,4 +57,11 @@ data class AirPlayConfig(
     val videoInCar: Boolean = false,
     /** Initial car appearance; absent when the head unit cannot determine it. */
     val nightMode: Boolean? = null,
+    /** Supporting music apps may send AAC ahead over TCP; enabled only after reconnect. */
+    val mainBufferedAudio: Boolean = false,
+    /** Estimated renderer start time; follows the existing music buffer setting. */
+    val mainBufferedStartLatencyMillis: Int = 400,
 )
+
+internal val AirPlayConfig.bufferedAudioOutputEnabled: Boolean
+    get() = mainBufferedAudio && !disableAudioOutput

@@ -2,6 +2,8 @@ package com.shilapi.xcertplay.airplay
 
 import android.util.Log
 import java.io.Closeable
+import java.io.EOFException
+import java.io.IOException
 import java.io.InputStream
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -70,11 +72,11 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
             val input = sock.getInputStream()
             while (!closed.get()) {
                 stats.reading()
-                val header = readFully(input, HEADER_LEN) ?: break
-                val bodySize = readU32Le(header, 0)
-                if (bodySize > MAX_BODY) break
-                val body = readFully(input, bodySize) ?: break
-                stats.received(HEADER_LEN + bodySize)
+                val header = readFully(input, HEADER_LEN, "header", allowCleanEof = true) ?: break
+                val bodySize = readU32Le(header, 0).toLong() and 0xffff_ffffL
+                if (bodySize > MAX_BODY) throw IOException("invalid video body size=$bodySize max=$MAX_BODY")
+                val body = readFully(input, bodySize.toInt(), "body")!!
+                stats.received(HEADER_LEN + bodySize.toInt())
                 onMessage(header, body, stats)
                 stats.processed()
             }
@@ -120,13 +122,15 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
         }
     }
 
-    private fun readFully(input: InputStream, length: Int): ByteArray? {
-        if (length < 0) return null
+    private fun readFully(input: InputStream, length: Int, part: String, allowCleanEof: Boolean = false): ByteArray? {
         val output = ByteArray(length)
         var offset = 0
         while (offset < length) {
             val read = input.read(output, offset, length - offset)
-            if (read < 0) return null
+            if (read < 0) {
+                if (offset == 0 && allowCleanEof) return null
+                throw EOFException("truncated video $part expected=$length received=$offset")
+            }
             offset += read
         }
         return output

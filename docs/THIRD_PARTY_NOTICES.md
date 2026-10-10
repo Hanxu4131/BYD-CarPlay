@@ -42,6 +42,6 @@ Required Notice: Copyright AndyShaman (https://github.com/AndyShaman/BYDMate)
 
 The maneuver PNGs under `shared/src/main/assets/byd-hud-icons` were imported from BYDMate. Its PolyForm Noncommercial 1.0.0 terms and required notice are included alongside the assets. These files are separate from the project code license; upstream describes them as donor assets and their original provenance is not independently established. The validated DiLink5.1 windshield path uses factory turn codes rather than these images.
 
-## Personal adaptation publication
+## BYD CarPlay adaptations and startup artwork
 
-Adaptation: 寒叙 (@Hanxu4131). This repository publishes program source only; no standalone APK or accessory/signing identity is included. The public startup additions use neutral geometry and runtime text. Apple-derived private startup PNG/traces are excluded. Existing upstream Apple icon and BYDMate assets retain their separate notices above; they are not relicensed as adaptation code.
+The Tang 2023 DM-i / platform-21 adaptations are maintained by Hanxu4131 (寒叙). Existing project and dependency credits remain in place. The startup artwork includes vector interpretations of Apple/CarPlay branding. These marks and graphics are separate from the code license and do not imply Apple or BYD affiliation, certification or endorsement. The reference handset screenshot and private car photographs are not included.

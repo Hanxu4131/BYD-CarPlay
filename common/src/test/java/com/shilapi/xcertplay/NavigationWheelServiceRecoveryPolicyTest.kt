@@ -6,19 +6,22 @@ import org.junit.Test
 class NavigationWheelServiceRecoveryPolicyTest {
     private val own = "com.shihab.diplay.tang21test/com.shilapi.xcertplay.NavigationWheelAccessibilityService"
     private val other = "cc.omycar.magicmanager/.Service:com.dudu/.Accessibility"
-    @Test fun threeFailuresCooldownAndUnresolvedFaultBudgetApplyEvenAcrossWake() {
+    @Test fun unresolvedFaultRetriesAfterThreeFailuresAndBackoffNeverGivesUp() {
         val policy = NavigationWheelServiceRecoveryPolicy()
         assertFalse(policy.observe(0, true, false, false))
         assertFalse(policy.observe(2000, true, false, false))
         assertTrue(policy.observe(4000, true, false, false))
-        repeat(29) { assertFalse(policy.observe(6000L + it * 2000L, true, false, false)) }
-        assertTrue(policy.observe(64000, true, true, false))
-        policy.wake()
-        assertFalse(policy.observe(124000, true, false, false))
-        assertFalse(policy.observe(126000, true, false, false))
-        assertTrue(policy.observe(128000, true, false, false))
-        policy.wake()
-        repeat(20) { assertFalse(policy.observe(200000L + it * 2000L, true, false, false)) }
+        for ((before, due) in listOf(63999L to 64000L, 183999L to 184000L,
+            423999L to 424000L, 723999L to 724000L, 1023999L to 1024000L)) {
+            // Wake and repeated observations cannot bypass the previous attempt's cooldown.
+            policy.wake()
+            repeat(3) { assertFalse(policy.observe(before - 2 + it, true, true, false)) }
+            assertTrue(policy.observe(due, true, true, false))
+        }
+        // A long-running unresolved fault still gets a bounded later retry.
+        assertFalse(policy.observe(1323997, true, false, false))
+        assertFalse(policy.observe(1323998, true, false, false))
+        assertTrue(policy.observe(1324000, true, false, false))
     }
     @Test fun healthyAndDisabledClearConsecutiveFailuresWithoutConsumingBudget() {
         val policy = NavigationWheelServiceRecoveryPolicy()
@@ -30,22 +33,20 @@ class NavigationWheelServiceRecoveryPolicyTest {
         assertFalse(policy.observe(7, true, false, false))
         assertTrue(policy.observe(8, true, false, false))
     }
-    @Test fun sixtySecondsHealthyAllowsLaterFailuresToRecoverWithoutRestartOrSave() {
-        val policy = exhausted()
+    @Test fun sustainedHealthResetsBackoffButPreservesLastAttemptCooldown() {
+        val policy = backedOff()
         assertFalse(policy.observe(200000, true, true, true))
-        assertFalse(policy.observe(259999, true, true, true))
-        // One millisecond short of the health period must not refill the exhausted budget.
-        assertFalse(policy.observe(260000, true, false, false))
-        assertFalse(policy.observe(262000, true, false, false))
-        assertFalse(policy.observe(264000, true, false, false))
-        assertFalse(policy.observe(266000, true, true, true))
-        assertFalse(policy.observe(326000, true, true, true))
-        assertFalse(policy.observe(328000, true, false, false))
-        assertFalse(policy.observe(330000, true, false, false))
-        assertTrue(policy.observe(332000, true, false, false))
+        assertFalse(policy.observe(260000, true, true, true))
+        repeat(3) { assertFalse(policy.observe(262000L + it * 2000L, true, false, false)) }
+        assertFalse(policy.observe(423999, true, false, false))
+        assertTrue(policy.observe(424000, true, false, false))
+        // Healthy reset returned the next delay to one minute rather than five minutes.
+        repeat(3) { assertFalse(policy.observe(426000L + it * 2000L, true, false, false)) }
+        assertFalse(policy.observe(483999, true, false, false))
+        assertTrue(policy.observe(484000, true, false, false))
     }
-    @Test fun FlappingDisabledAndWakeCannotMasqueradeAsSustainedRecovery() {
-        val policy = exhausted()
+    @Test fun flappingDisabledAndWakeDoNotResetBackoff() {
+        val policy = backedOff()
         assertFalse(policy.observe(200000, true, true, true))
         assertFalse(policy.observe(230000, true, true, false))
         assertFalse(policy.observe(232000, true, true, true))
@@ -55,6 +56,10 @@ class NavigationWheelServiceRecoveryPolicyTest {
         assertFalse(policy.observe(300000, true, true, true))
         assertFalse(policy.observe(330000, true, true, true))
         repeat(3) { assertFalse(policy.observe(332000L + it * 2000L, true, false, false)) }
+        assertTrue(policy.observe(424000, true, false, false))
+        repeat(3) { assertFalse(policy.observe(426000L + it * 2000L, true, false, false)) }
+        assertFalse(policy.observe(484000, true, false, false))
+        assertTrue(policy.observe(724000, true, false, false))
     }
     @Test fun connectedWithoutKeyFilterIsAFaultButUnknownFlagsDoNotTriggerRepair() {
         val policy = NavigationWheelServiceRecoveryPolicy()
@@ -71,9 +76,9 @@ class NavigationWheelServiceRecoveryPolicyTest {
         assertFalse(policy.observe(22000,true,false,false,false))
         assertTrue(policy.observe(24000,true,false,false,false))
     }
-    private fun exhausted(): NavigationWheelServiceRecoveryPolicy {
+    private fun backedOff(): NavigationWheelServiceRecoveryPolicy {
         val policy = NavigationWheelServiceRecoveryPolicy()
-        for (start in listOf(0L, 64000L, 128000L)) {
+        for (start in listOf(0L, 60000L, 180000L)) {
             assertFalse(policy.observe(start, true, false, false))
             assertFalse(policy.observe(start + 2000, true, false, false))
             assertTrue(policy.observe(start + 4000, true, false, false))

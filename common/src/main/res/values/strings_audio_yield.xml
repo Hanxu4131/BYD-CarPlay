@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="audio_focus_auto_yield">Mute music during temporary focus loss</string>
+    <string name="audio_focus_auto_yield_desc">When audio focus is enabled, mute music during temporary Android focus loss and restore it on focus gain. Navigation, calls and Siri keep their own volume. Changes apply at the next connection.</string>
+</resources>

@@ -130,4 +130,20 @@ class ClusterStartupViewTest {
         assertEquals(StartupArtworkBounds(0f, 0f, 2400f, 900f), StartupArtworkBounds.fit(2400, 900, null))
     }
 
+    @Test fun standardStackStaysCentredAndInsideWideNarrowAndFullWindows() {
+        for ((width, height) in listOf(1920f to 1080f, 850f to 970f, 800f to 390f,
+            320f to 970f, 2400f to 390f)) {
+            val layout = StandardStartupLayout.fit(width, height)
+            assertTrue(layout.iconSize > 0f)
+            assertEquals(width * .5f, layout.iconLeft + layout.iconSize * .5f, .01f)
+            assertEquals(width * .5f, layout.logoLeft + layout.logoWidth * .5f, .01f)
+            assertEquals(400f / 98f, layout.logoWidth / layout.logoHeight, .001f)
+            assertTrue(layout.iconLeft >= 0f && layout.iconLeft + layout.iconSize <= width)
+            assertTrue(layout.logoLeft >= 0f && layout.logoLeft + layout.logoWidth <= width)
+            assertTrue(layout.iconTop >= 0f && layout.logoTop + layout.logoHeight <= height)
+            assertEquals(height * .5f,
+                (layout.iconTop + layout.logoTop + layout.logoHeight) * .5f, .01f)
+        }
+    }
+
 }

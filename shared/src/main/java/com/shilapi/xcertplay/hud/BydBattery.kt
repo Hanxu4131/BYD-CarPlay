@@ -42,10 +42,12 @@ internal object BydBattery {
 
     internal fun read(shell: (String) -> String?, legacy: BydLegacyBatteryProfile?): BydBatteryReading? {
         val reported = shell("getprop ro.car.protocol")?.trim() ?: return null
-        val protocol = when (reported) {
+        // 已解析的旧平台地址优先，不能让通用协议字段覆盖平台21的读取路径。
+        if (reported.isEmpty() && legacy != null) return readLegacy(legacy, shell)
+        val property = reported.ifEmpty { shell("getprop sys.car.protocol")?.trim().orEmpty() }
+        val protocol = when (property) {
             "CAN" -> BydBatteryProtocol.CAN
             "CANFD" -> BydBatteryProtocol.CANFD
-            "" -> return legacy?.let { readLegacy(it, shell) }
             else -> return null
         }
         val percent = BydParcel.value(shell("service call autoservice 7 i32 1014 i32 ${protocol.percentId}"))

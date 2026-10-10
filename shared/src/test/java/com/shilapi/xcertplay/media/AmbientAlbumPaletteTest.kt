@@ -28,6 +28,50 @@ class AmbientAlbumPaletteTest {
             0xffffffff.toInt(), 0xff777777.toInt(), 0x00ff0000)))
         assertNull(AmbientAlbumPalette.dominantRgb(intArrayOf()))
     }
+    @Test fun majorityWhiteAndColdWhiteUseOemNeutralColors() {
+        assertEquals(29, AmbientAlbumPalette.albumColor(IntArray(576) { 0xffffffff.toInt() }))
+        assertEquals(30, AmbientAlbumPalette.albumColor(IntArray(576) { 0xffe7f3fa.toInt() }))
+        assertEquals(29, AmbientAlbumPalette.albumColor(IntArray(576) { 0xfffff3e7.toInt() }))
+        assertEquals(29, AmbientAlbumPalette.albumColor(IntArray(576) {
+            if (it < 288) 0xffffffff.toInt() else 0xff222222.toInt()
+        }))
+    }
+    @Test fun validColoredAccentStillWinsOverMajorityWhite() {
+        for (white in listOf(0xffffffff.toInt(), 0xffe7f3fa.toInt())) {
+            val pixels = IntArray(576) { if (it == 0) 0xffdd2222.toInt() else white }
+            val expected = AmbientAlbumPalette.bydColor(AmbientAlbumPalette.dominantRgb(pixels)!!)
+            assertEquals(expected, AmbientAlbumPalette.albumColor(pixels))
+            assertFalse(expected in 29..30)
+        }
+    }
+    @Test fun insufficientWhiteDarkGreyBlackAndTransparentCoversStillUseAllColors() {
+        val covers = listOf(
+            intArrayOf(),
+            IntArray(576) { 0xff000000.toInt() },
+            IntArray(576) { 0xff777777.toInt() },
+            IntArray(576) { 0x00ffffff },
+            IntArray(576) { if (it < 287) 0xffffffff.toInt() else 0xff222222.toInt() },
+            IntArray(576) { if (it == 0) 0xffffffff.toInt() else 0x00ffffff },
+        )
+        for (pixels in covers) {
+            assertNull(AmbientAlbumPalette.albumColor(pixels))
+            assertEquals((1..31).toList(), ambientColorPalette(AmbientColorSource.ALBUM,
+                emptyList(), AmbientAlbumPalette.albumColor(pixels)))
+        }
+    }
+    @Test fun neutralAlbumPalettesStayWithinWhiteAndColdWhite() {
+        for (center in listOf(29, 30)) {
+            assertEquals(listOf(29, 30), AmbientAlbumPalette.neighbors(center))
+            assertEquals(listOf(29, 30), ambientColorPalette(AmbientColorSource.ALBUM, emptyList(), center))
+        }
+    }
+    @Test fun existingColoredCoverMappingRemainsIdentical() {
+        for (index in 1..31) {
+            val pixels = IntArray(576) { AmbientAlbumPalette.previewRgb(index) }
+            val rgb = AmbientAlbumPalette.dominantRgb(pixels) ?: continue
+            assertEquals(AmbientAlbumPalette.bydColor(rgb), AmbientAlbumPalette.albumColor(pixels))
+        }
+    }
     @Test fun albumPaletteUsesOemNearbyHuesAndInvalidCoverFallsBackToAllColors() {
         assertEquals(listOf(1, 2), ambientColorPalette(AmbientColorSource.ALBUM, listOf(8), 1))
         assertFalse(ambientColorPalette(AmbientColorSource.ALBUM, emptyList(), 28).contains(29))

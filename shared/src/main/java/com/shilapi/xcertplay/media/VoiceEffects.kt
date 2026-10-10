@@ -28,6 +28,47 @@ internal class VoiceEffects<T>(
         return false
     }
 
+    /** Keeps another working effect only after this handle is confirmed off. */
+    @Synchronized
+    fun configureCapture(name: String, requested: Boolean, create: () -> T?): VoiceEffectState {
+        val effect = try {
+            create()
+        } catch (error: RuntimeException) {
+            report("microphone effect=$name enabled=unknown reason=create failed", error)
+            return VoiceEffectState.UNCONFIRMED
+        }
+        if (effect == null) {
+            report("microphone effect=$name enabled=unknown reason=unavailable", null)
+            return VoiceEffectState.UNCONFIRMED
+        }
+        val configured = try {
+            configure(effect, requested)
+        } catch (error: RuntimeException) {
+            report("microphone effect=$name requested=$requested configuration failed", error)
+            false
+        }
+        if (configured) {
+            active.add(name to effect)
+            report("microphone effect=$name enabled=$requested", null)
+            return if (requested) VoiceEffectState.ENABLED else VoiceEffectState.DISABLED
+        }
+        val disabled = try {
+            configure(effect, false)
+        } catch (error: RuntimeException) {
+            report("microphone effect=$name disable confirmation failed", error)
+            false
+        }
+        if (disabled) {
+            // Releasing a disabled handle can restore vendor defaults during the same session.
+            active.add(name to effect)
+            report("microphone effect=$name enabled=false requested=$requested disabledConfirmed=true", null)
+            return VoiceEffectState.DISABLED
+        }
+        report("microphone effect=$name enabled=unknown disabledConfirmed=false", null)
+        releaseSafely(effect)
+        return VoiceEffectState.UNCONFIRMED
+    }
+
     @Synchronized
     fun disableAll(): Boolean {
         var success = true

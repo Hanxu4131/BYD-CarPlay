@@ -429,6 +429,11 @@ class DiPlayActivity : ComponentActivity() {
                 bufferPresets.indexOf(AirPlayPersistence.loadMediaBufferMillis(this)).coerceAtLeast(0)) {
                 AirPlayPersistence.saveMediaBufferMillis(this, bufferPresets[it])
             }
+            toggle(card, getString(R.string.main_buffered_audio), getString(R.string.main_buffered_audio_description),
+                AirPlayPersistence.loadMainBufferedAudio(this)) {
+                AirPlayPersistence.saveMainBufferedAudio(this, it)
+                reconnectForClusterMap()
+            }
             choice(card, getString(R.string.frame_rate), listOf(getString(R.string.s_30_fps_lighter_load), getString(R.string.s_60_fps_smoother_motion)), if (AirPlayPersistence.loadFps(this) == 60) 1 else 0) { AirPlayPersistence.saveFps(this, if (it == 1) 60 else 30) }
             toggle(card, getString(R.string.efficient_video), getString(R.string.use_hevc_leave_off_for_the_widest_head_unit_compatibility), AirPlayPersistence.loadHevcEnabled(this)) { AirPlayPersistence.saveHevcEnabled(this, it) }
             toggle(card, "分屏自适应（H.264）", "需关闭高效视频并重新连接一次。仅切换已预声明的全屏/分屏区域；未确认时保留比例显示。", AdaptiveDisplayPreferences.enabled(this)) {
@@ -443,7 +448,7 @@ class DiPlayActivity : ComponentActivity() {
             }
         }
         section(content, getString(R.string.audio_routing)) { card ->
-            toggle(card, getString(R.string.contrib_audio_home_toggle_audio_focus), getString(R.string.contrib_audio_home_toggle_audio_focus_desc), AirPlayPersistence.loadAudioFocusEnabled(this)) { AirPlayPersistence.saveAudioFocusEnabled(this, it) }
+            audioFocusControls(card)
             toggle(card, getString(R.string.navigation_volume_wheel), getString(R.string.navigation_volume_wheel_help), AirPlayPersistence.loadNavigationVolumeWheelEnabled(this)) {
                 AirPlayPersistence.saveNavigationVolumeWheelEnabled(this, it)
                 NavigationWheelServiceRecovery.changed(this)
@@ -1544,6 +1549,21 @@ class DiPlayActivity : ComponentActivity() {
         build(card)
         parent.addView(card, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(18) })
     }
+    private fun audioFocusControls(parent: LinearLayout) {
+        val enabled = AirPlayPersistence.loadAudioFocusEnabled(this)
+        val dependent = column().apply { visibility = if (enabled) View.VISIBLE else View.GONE }
+        toggle(parent, getString(R.string.contrib_audio_home_toggle_audio_focus),
+            getString(R.string.contrib_audio_home_toggle_audio_focus_desc), enabled) {
+            AirPlayPersistence.saveAudioFocusEnabled(this, it)
+            dependent.visibility = if (it) View.VISIBLE else View.GONE
+        }
+        toggle(dependent, getString(R.string.audio_focus_auto_yield), getString(R.string.audio_focus_auto_yield_desc),
+            AirPlayPersistence.loadAudioFocusAutoYield(this)) {
+            AirPlayPersistence.saveAudioFocusAutoYield(this, it)
+        }
+        parent.addView(dependent)
+    }
+
     private fun toggle(parent: LinearLayout, title: String, description: String, value: Boolean, enabled: Boolean = true, save: (Boolean) -> Unit) {
         val line = row().apply { gravity = Gravity.CENTER_VERTICAL; setPadding(0, dp(12), 0, dp(12)) }
         val text = column(); text.addView(label(title, 18, TEXT, true)); text.addView(label(description, 14, MUTED).apply { setPadding(0, dp(6), dp(16), 0) })

@@ -502,4 +502,8 @@
     <string name="navigation_wheel_service_name">BYD Carplay 导航滚轮</string>
     <string name="navigation_wheel_service_settings">开启导航滚轮服务</string>
     <string name="navigation_wheel_service_description">仅处理导航播报期间的音量按键，不读取屏幕内容。</string>
+    <string name="main_buffered_audio">音乐预缓冲</string>
+    <string name="main_buffered_audio_description">支持的音乐 App 会提前发送音频，减少短暂 Wi-Fi 波动造成的断音。保存后重连 CarPlay 生效，音乐缓冲时长仍按原设置。</string>
+    <string name="map_follow_carplay_theme">地图跟随 CarPlay 主题深浅</string>
+    <string name="map_follow_carplay_theme_description">切换无需重连。关闭后由手机地图自行决定深浅。</string>
 </resources>

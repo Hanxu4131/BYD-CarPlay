@@ -35,25 +35,44 @@ internal class MicrophoneCaptureDiagnostics(private val report: (String) -> Unit
     }
 
     @Synchronized
-    fun snapshot(recorder: AudioRecord, reason: String) = safely {
-        if (Build.VERSION.SDK_INT < 29) {
-            emit("Microphone capture state reason=$reason session=${recorder.audioSessionId} api29Metadata=false")
-            return@safely
+    fun snapshot(recorder: AudioRecord, reason: String) {
+        // Route diagnostics work on API 28 too, even when recording configuration is absent.
+        safely {
+            val route = recorder.routedDevice
+            emit("Microphone route reason=$reason session=${recorder.audioSessionId} deviceType=${route?.type} deviceId=${route?.id}")
         }
-        val config = recorder.activeRecordingConfiguration
-        if (config == null) {
-            emit("Microphone capture state reason=$reason session=${recorder.audioSessionId} activeConfiguration=none")
-            return@safely
+        if (Build.VERSION.SDK_INT >= 28) safely {
+            try {
+                val microphones = recorder.activeMicrophones
+                val mappings = microphones.joinToString("|") { mic ->
+                    microphoneMappingLabel(mic.id, mic.group, mic.indexInTheGroup,
+                        mic.channelMapping.map { it.first to it.second })
+                }
+                emit("Microphone active mapping reason=$reason session=${recorder.audioSessionId} count=${microphones.size} microphones=[$mappings]")
+            } catch (error: Exception) {
+                emit("Microphone active mapping reason=$reason session=${recorder.audioSessionId} unavailable=${error.javaClass.simpleName}")
+            }
         }
-        val device = config.audioDevice
-        fun format(value: android.media.AudioFormat) =
-            "${value.sampleRate}Hz/${value.channelCount}ch/encoding${value.encoding}"
-        fun effects(values: List<android.media.audiofx.AudioEffect.Descriptor>) =
-            values.joinToString("|") { it.name.replace('\n', ' ').replace('\r', ' ') }
-        emit("Microphone capture state reason=$reason session=${recorder.audioSessionId} " +
-            "silenced=${config.isClientSilenced} deviceType=${device?.type} deviceId=${device?.id} " +
-            "clientFormat=${format(config.clientFormat)} deviceFormat=${format(config.format)} " +
-            "clientEffects=[${effects(config.clientEffects)}] activeEffects=[${effects(config.effects)}]")
+        safely {
+            if (Build.VERSION.SDK_INT < 29) {
+                emit("Microphone capture state reason=$reason session=${recorder.audioSessionId} api29Metadata=false")
+                return@safely
+            }
+            val config = recorder.activeRecordingConfiguration
+            if (config == null) {
+                emit("Microphone capture state reason=$reason session=${recorder.audioSessionId} activeConfiguration=none")
+                return@safely
+            }
+            val device = config.audioDevice
+            fun format(value: android.media.AudioFormat) =
+                "${value.sampleRate}Hz/${value.channelCount}ch/encoding${value.encoding}"
+            fun effects(values: List<android.media.audiofx.AudioEffect.Descriptor>) =
+                values.joinToString("|") { it.name.replace('\n', ' ').replace('\r', ' ') }
+            emit("Microphone capture state reason=$reason session=${recorder.audioSessionId} " +
+                "silenced=${config.isClientSilenced} deviceType=${device?.type} deviceId=${device?.id} " +
+                "clientFormat=${format(config.clientFormat)} deviceFormat=${format(config.format)} " +
+                "clientEffects=[${effects(config.clientEffects)}] activeEffects=[${effects(config.effects)}]")
+        }
     }
 
     fun observe(bytes: ByteArray, count: Int) = safely {
@@ -122,4 +141,10 @@ internal class EarlyMicrophoneSignalStatistics {
         const val REPORT_NS = 250_000_000L
         const val WINDOW_NS = 3_000_000_000L
     }
+}
+
+/** No hardware address or inferred seat name belongs in the microphone mapping log. */
+internal fun microphoneMappingLabel(id: Int, group: Int, index: Int,
+    channels: List<Pair<Int, Int>>): String {
+    return "id=$id group=$group index=$index channels=[${channels.joinToString(",") { "${it.first}:${it.second}" }}]"
 }

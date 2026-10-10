@@ -110,7 +110,10 @@ class BydBatteryTest {
         for (protocol in listOf(null, "", "\r\n", "SOMEIP", "error: closed")) {
             val commands = mutableListOf<String>()
             assertNull(BydBattery.read { command -> commands.add(command); protocol })
-            assertEquals(listOf("getprop ro.car.protocol"), commands)
+            val expected = if (protocol?.trim()?.isEmpty() == true)
+                listOf("getprop ro.car.protocol", "getprop sys.car.protocol")
+            else listOf("getprop ro.car.protocol")
+            assertEquals(expected, commands)
         }
     }
 
@@ -126,4 +129,54 @@ class BydBatteryTest {
             assertNull(BydBattery.read(shell(replies + ("1033543720" to "Result: Parcel(00000000 $invalid   '........')"), "CAN")))
         }
     }
+    @Test
+    fun blankReadOnlyPropertyUsesKnownSystemProtocol() {
+        val commands = mutableListOf<String>()
+        val reply = shell(car)
+        val reading = BydBattery.read { command ->
+            commands.add(command)
+            when (command) {
+                "getprop ro.car.protocol" -> "\n"
+                "getprop sys.car.protocol" -> " CANFD\n"
+                else -> reply(command)
+            }
+        }!!
+        assertEquals(25.0, reading.percent, 0.001)
+        assertEquals(150, reading.rangeKm)
+        assertEquals(listOf("getprop ro.car.protocol", "getprop sys.car.protocol"), commands.take(2))
+    }
+
+    @Test
+    fun resolvedLegacyProfileKeepsItsOwnAddressesDespiteSystemProtocol() {
+        val legacy = BydLegacyBatteryProfile(1014, 111, 222, 1009, 333, null, null)
+        val commands = mutableListOf<String>()
+        val reading = BydBattery.read({ command ->
+            commands.add(command)
+            when (command) {
+                "getprop ro.car.protocol" -> ""
+                "getprop sys.car.protocol" -> "CANFD"
+                legacy.percentCommand() -> "Result: Parcel(00000000 42480000   '........')"
+                legacy.rangeCommand() -> "Result: Parcel(00000000 00000046   '........')"
+                legacy.chargingCommand() -> "Result: Parcel(00000000 00000000   '........')"
+                else -> null
+            }
+        }, legacy)!!
+        assertEquals(50.0, reading.percent, 0.001)
+        assertEquals(70, reading.rangeKm)
+        assertFalse(commands.contains("getprop sys.car.protocol"))
+        assertEquals(listOf("getprop ro.car.protocol", legacy.percentCommand(),
+            legacy.rangeCommand(), legacy.chargingCommand()), commands)
+    }
+
+    @Test
+    fun failedLegacyReadDoesNotProbeUnrelatedSystemAddresses() {
+        val legacy = BydLegacyBatteryProfile(1014, 111, 222, 1009, 333, null, null)
+        val commands = mutableListOf<String>()
+        assertNull(BydBattery.read({ command ->
+            commands.add(command)
+            if (command == "getprop ro.car.protocol") "" else null
+        }, legacy))
+        assertEquals(listOf("getprop ro.car.protocol", legacy.percentCommand()), commands)
+    }
+
 }

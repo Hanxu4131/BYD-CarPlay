@@ -14,6 +14,8 @@ data class MicrophoneConfig(
     val key: ByteArray,
     val codec: AudioCodecKind = AudioCodecKind.LPCM,
     val bitrate: Int? = null,
+    /** RTP clock selected from observed Opus format bits; captured PCM remains at 48 kHz. */
+    val opusClockRate: Int = 48_000,
 ) {
     val samplesPerPacket: Int
         get() = if (codec == AudioCodecKind.OPUS) {
@@ -22,11 +24,24 @@ data class MicrophoneConfig(
             maxOf(1, sampleRate * frameMillis / 1000)
         }
 
+    /** RTP ticks per packet; Siri's observed 24 kHz stream differs from its 48 kHz capture. */
+    val rtpSamplesPerPacket: Int
+        get() = if (codec == AudioCodecKind.OPUS) opusClockRate * OPUS_FRAME_MILLIS / 1000 else samplesPerPacket
+
     val frameBytes: Int
         get() = samplesPerPacket * channels * 2
 
-    private companion object {
-        const val OPUS_SAMPLES_PER_PACKET = 960
+    companion object {
+        private const val OPUS_SAMPLES_PER_PACKET = 960
+        private const val OPUS_CAPTURE_RATE = 48_000
+        private const val OPUS_FRAME_MILLIS = 20
+
+        /** Only the observed Siri format has a 24 kHz RTP clock; calls and unknown formats stay 48 kHz. */
+        fun opusClockRate(formatBits: Long): Int = when {
+            formatBits and 0x40000000L != 0L -> 48_000
+            formatBits and 0x20000000L != 0L -> 24_000
+            else -> OPUS_CAPTURE_RATE
+        }
     }
 }
 

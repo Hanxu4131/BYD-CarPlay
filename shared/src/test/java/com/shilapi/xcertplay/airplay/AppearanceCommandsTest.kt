@@ -66,6 +66,59 @@ class AppearanceCommandsTest {
     }
 
     @Test
+    fun automaticMapsLeaveCarPlayUiPolicyUnchangedOnEveryAdvertisedDisplay() {
+        for (night in listOf(false, true)) {
+            for (manual in listOf(false, true)) {
+                for (hasCluster in listOf(false, true)) {
+                    val following = AppearanceCommands.build(CarPlayAppearance(night, manual), hasCluster)
+                    val automatic = AppearanceCommands.build(CarPlayAppearance(night, manual, false), hasCluster)
+                    assertEquals(following.map { it["type"] }, automatic.map { it["type"] })
+                    for ((original, changed) in following.zip(automatic)) {
+                        if (changed["type"] != "mapAppearanceUpdate") {
+                            assertEquals(original, changed)
+                        } else {
+                            val params = changed["params"] as Map<*, *>
+                            assertEquals(0, params["appearanceSetting"])
+                            assertEquals(if (night) 1 else 0, params["appearanceMode"])
+                            assertEquals((original["params"] as Map<*, *>)["uuid"], params["uuid"])
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    fun explicitFollowPolicyPreservesExistingCommands() {
+        for (night in listOf(false, true)) {
+            for (manual in listOf(false, true)) {
+                for (hasCluster in listOf(false, true)) {
+                    assertEquals(
+                        AppearanceCommands.build(CarPlayAppearance(night, manual), hasCluster),
+                        AppearanceCommands.build(CarPlayAppearance(night, manual, true), hasCluster),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    fun pendingSessionReplaysLatestMapPolicyEvenWhenUiThemeDidNotChange() {
+        for (hasCluster in listOf(false, true)) {
+            for (latestPolicy in listOf(false, true)) {
+                val pending = PendingAppearance()
+                pending.update(CarPlayAppearance(true, true, !latestPolicy))
+                assertFalse(pending.flush(hasCluster) { false })
+                pending.update(CarPlayAppearance(true, true, latestPolicy))
+                val sent = mutableListOf<Map<String, Any?>>()
+                assertTrue(pending.flush(hasCluster) { sent += it; true })
+                assertEquals(AppearanceCommands.build(CarPlayAppearance(true, true, latestPolicy), hasCluster), sent)
+                assertTrue(pending.flush(hasCluster) { throw AssertionError("Already flushed") })
+            }
+        }
+    }
+
+    @Test
     fun disconnectDiscardsPendingAppearance() {
         val pending = PendingAppearance()
         pending.update(CarPlayAppearance(true, true))

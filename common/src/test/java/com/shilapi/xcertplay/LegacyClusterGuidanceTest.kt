@@ -68,7 +68,9 @@ class LegacyClusterGuidanceTest {
         withRouteClock { advance ->
             navigate()
             assertTrue(LegacyClusterGuidance.visible(combined, CarPlayGlance.snapshot()))
-            advance(30_000_000_000L)
+            advance(119_000_000_000L)
+            assertTrue(LegacyClusterGuidance.visible(combined, CarPlayGlance.snapshot()))
+            advance(1_000_000_000L)
             val state = CarPlayGlance.snapshot()
             assertTrue(state.connected)
             assertFalse(LegacyClusterGuidance.visible(combined, state))

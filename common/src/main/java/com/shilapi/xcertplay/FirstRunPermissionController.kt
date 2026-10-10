@@ -85,9 +85,8 @@ internal class FirstRunPermissionController(
         return FirstRunPermissionPolicy.runtimePermissions(Build.VERSION.SDK_INT, declared, granted).toTypedArray()
     }
     private fun accessibilityAllowed(): Boolean {
-        val own = ComponentName(activity, NavigationWheelAccessibilityService::class.java)
-        return Settings.Secure.getString(activity.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES)
-            ?.split(':')?.any { ComponentName.unflattenFromString(it) == own } == true
+        return NavigationWheelServiceIdentity.containsOwn(activity,
+            Settings.Secure.getString(activity.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES))
     }
     private fun openSetting(intent: Intent, after: Step) {
         waiting = true

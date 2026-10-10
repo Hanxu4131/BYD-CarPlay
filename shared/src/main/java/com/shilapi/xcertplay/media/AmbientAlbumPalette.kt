@@ -27,6 +27,24 @@ object AmbientAlbumPalette {
             ((green[index] / total).toInt() shl 8) or (blue[index] / total).toInt()
     }
 
+    /** Keeps the existing colored-hue selection first, then accepts a majority white cover. */
+    fun albumColor(pixels: IntArray): Int? {
+        dominantRgb(pixels)?.let { return bydColor(it) }
+        if (pixels.isEmpty()) return null
+        var whiteCount = 0
+        var red = 0L; var green = 0L; var blue = 0L
+        for (argb in pixels) {
+            if ((argb ushr 24) < 128) continue
+            val r = (argb ushr 16) and 255; val g = (argb ushr 8) and 255; val b = argb and 255
+            // Bright, low-chroma pixels only; transparent padding still counts toward cover area.
+            if (minOf(r, g, b) < 200 || maxOf(r, g, b) - minOf(r, g, b) > 38) continue
+            whiteCount++; red += r; green += g; blue += b
+        }
+        if (whiteCount.toLong() * 2 < pixels.size || whiteCount == 0) return null
+        // A small blue/cyan cast selects OEM cold white; neutral and warm whites use white.
+        return if (blue - red >= whiteCount.toLong() * 8 && blue >= green) 30 else 29
+    }
+
     // OEM CarSetting.apk light_ambient_color_{1..31}_all.png: same lamp-strip pixel
     // across all 31 preview resources. These are UI reference colors, not measured lamp RGB.
     private val bydPreviewRgb = listOf(
@@ -71,6 +89,7 @@ object AmbientAlbumPalette {
     }
 
     internal fun neighbors(center: Int): List<Int> {
+        if (center == 29 || center == 30) return listOf(29, 30)
         val target = colorHue(bydPreviewRgb[center - 1])
         return bydPreviewRgb.indices.filter { saturation(bydPreviewRgb[it]) >= 0.20 &&
             hueDistance(target, colorHue(bydPreviewRgb[it])) <= 35 }

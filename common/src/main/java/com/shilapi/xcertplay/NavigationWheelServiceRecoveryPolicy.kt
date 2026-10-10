@@ -1,9 +1,9 @@
 package com.shilapi.xcertplay
 
-/** Three attempts per unresolved fault; a minute of healthy binding starts a new fault budget. */
+/** Keep retrying a missing service with bounded backoff; sustained health resets the delay. */
 internal class NavigationWheelServiceRecoveryPolicy {
     private var failures = 0
-    private var repairs = 0
+    private var retryDelayMillis = 60_000L
     private var nextRepair = 0L
     private var healthySince: Long? = null
     fun wake() { failures = 0; healthySince = null }
@@ -13,16 +13,16 @@ internal class NavigationWheelServiceRecoveryPolicy {
             failures = 0
             val since = healthySince
             if (since == null || now < since) healthySince = now
-            else if (now - since >= 60_000L) repairs = 0
-            // Keep the last attempt's cooldown even when the fault budget is replenished.
+            else if (now - since >= 60_000L) retryDelayMillis = 60_000L
+            // Preserve the previous attempt's cooldown even after sustained recovery.
             return false
         }
         healthySince = null
         failures = (failures + 1).coerceAtMost(3)
-        if (failures < 3 || repairs >= 3 || now < nextRepair) return false
-        repairs++
+        if (failures < 3 || now < nextRepair) return false
         failures = 0
-        nextRepair = now + 60_000L
+        nextRepair = now + retryDelayMillis
+        retryDelayMillis = (retryDelayMillis * 2L).coerceAtMost(300_000L)
         return true
     }
 }

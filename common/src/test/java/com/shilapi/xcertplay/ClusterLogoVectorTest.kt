@@ -1,6 +1,7 @@
 package com.shilapi.xcertplay
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
 import com.shilapi.xcertplay.host.R
@@ -16,23 +17,44 @@ import org.robolectric.annotation.GraphicsMode
 @Config(sdk = [29])
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 class ClusterLogoVectorTest {
-    @Test fun publicLoadingMarksRemainReadableAtDifferentRenderSizes() {
+    @Test fun vectorRetainsTheOriginalMarkSilhouetteAndLetterHoles() {
         val context = RuntimeEnvironment.getApplication()
-        for (id in listOf(R.drawable.cluster_carplay_logo_vector, R.drawable.cluster_carplay_ultra_logo_vector)) {
-            for (scale in listOf(1, 3)) {
-                val mark = requireNotNull(context.getDrawable(id))
-                val width = (mark.intrinsicWidth * scale).coerceAtLeast(1)
-                val height = (mark.intrinsicHeight * scale).coerceAtLeast(1)
-                val image = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                mark.setBounds(0, 0, width, height)
-                mark.draw(Canvas(image))
-                assertEquals("Outer corners should remain transparent", 0, Color.alpha(image.getPixel(0, 0)))
-                val pixels = IntArray(width * height)
-                image.getPixels(pixels, 0, width, 0, 0, width, height)
-                val visible = pixels.count { Color.alpha(it) >= 128 }
-                assertTrue("Loading glyph must be visible", visible > height * height / 10)
-                assertTrue("The surrounding text area remains transparent", visible < width * height / 2)
-            }
+        val original = BitmapFactory.decodeResource(context.resources, R.drawable.cluster_carplay_ultra_logo)
+        val rendered = Bitmap.createBitmap(584, 98, Bitmap.Config.ARGB_8888)
+        val mark = requireNotNull(context.getDrawable(R.drawable.cluster_carplay_ultra_logo_vector))
+        mark.setBounds(0, 0, 584, 98)
+        mark.draw(Canvas(rendered))
+        var error = 0L
+        var filled = 0
+        for (y in 0 until 98) for (x in 0 until 584) {
+            val a = Color.alpha(original.getPixel(x, y))
+            val b = Color.alpha(rendered.getPixel(x, y))
+            error += kotlin.math.abs(a - b)
+            if (b >= 128) filled++
         }
+        assertTrue("Vector contour changed the mark: error=${error / (584.0 * 98)}", error / (584.0 * 98) < 4.0)
+        assertTrue("Mark must contain both letters and transparent holes", filled in 10000..40000)
     }
+    @Test fun ordinaryLogoRetainsTheFullCarPlayGlyphsWithoutTheUltraWord() {
+        val context = RuntimeEnvironment.getApplication()
+        val ultra = requireNotNull(context.getDrawable(R.drawable.cluster_carplay_ultra_logo_vector))
+        val ordinary = requireNotNull(context.getDrawable(R.drawable.cluster_carplay_logo_vector))
+        assertEquals(584f / 98f, ultra.intrinsicWidth.toFloat() / ultra.intrinsicHeight, .02f)
+        assertEquals(400f / 98f, ordinary.intrinsicWidth.toFloat() / ordinary.intrinsicHeight, .02f)
+        val full = Bitmap.createBitmap(584, 98, Bitmap.Config.ARGB_8888)
+        ultra.setBounds(0, 0, 584, 98)
+        ultra.draw(Canvas(full))
+        val crop = Bitmap.createBitmap(400, 98, Bitmap.Config.ARGB_8888)
+        ordinary.setBounds(0, 0, 400, 98)
+        ordinary.draw(Canvas(crop))
+        var error = 0L
+        var rightEdge = 0
+        for (y in 0 until 98) for (x in 0 until 400) {
+            error += kotlin.math.abs(Color.alpha(full.getPixel(x, y)) - Color.alpha(crop.getPixel(x, y)))
+            if (x >= 395) rightEdge += Color.alpha(crop.getPixel(x, y))
+        }
+        assertTrue("The ordinary logo must retain the original CarPlay contours", error / (400.0 * 98) < 1.0)
+        assertEquals("No glyph should touch the crop edge", 0, rightEdge)
+    }
+
 }

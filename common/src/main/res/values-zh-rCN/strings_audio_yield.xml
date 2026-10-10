@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="audio_focus_auto_yield">临时失去焦点时静音音乐</string>
+    <string name="audio_focus_auto_yield_desc">开启音频焦点后，系统暂时接管声音时静音音乐，焦点恢复后恢复音乐。导航、通话和Siri音量独立。修改后下次连接生效。</string>
+</resources>

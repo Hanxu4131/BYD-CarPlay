@@ -16,7 +16,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * transmit stamps. The resulting offset and round-trip time steer a local monotonic clock onto
  * the phone's media-clock domain, which /feedback reports.
  */
-class NtpClock : Closeable {
+class NtpClock(
+    private val onCorrectionDiagnostic: ((NtpCorrectionDiagnostic) -> Unit)? = null,
+) : Closeable {
     private val running = AtomicBoolean(false)
     private val socketLock = Any()
     private val clockLock = Any()
@@ -34,6 +36,7 @@ class NtpClock : Closeable {
     private var pickOffset = 0.0
     private var pendingT1: BigInteger? = null
     private var synced = false
+    private val correctionDiagnostics = onCorrectionDiagnostic?.let { NtpCorrectionDiagnostics() }
 
     fun listen(): Int {
         check(!running.getAndSet(true)) { "NtpClock is already running" }
@@ -158,24 +161,34 @@ class NtpClock : Closeable {
         pickCount = PICK_COUNT
         pickRtt = Double.POSITIVE_INFINITY
 
+        var diagnostic: NtpCorrectionDiagnostic? = null
         synchronized(clockLock) {
             val useSample = delays.all { selectedRtt <= it }
             delays[delayIndex] = selectedRtt
             delayIndex = (delayIndex + 1) % DELAY_WINDOW
-            if (useSample) applyOffset(selectedOffset)
+            if (useSample) diagnostic = applyOffset(selectedOffset, selectedRtt)
+        }
+        diagnostic?.let { event ->
+            try {
+                onCorrectionDiagnostic?.invoke(event)
+            } catch (_: Exception) {
+                // Diagnostics must never interrupt clock synchronization.
+            }
         }
     }
 
-    private fun applyOffset(offsetSec: Double) {
+    private fun applyOffset(offsetSec: Double, selectedRttSec: Double): NtpCorrectionDiagnostic? {
         val stepping = !synced || Math.abs(offsetSec) > STEP_THRESHOLD_SEC
         val applied = if (stepping) offsetSec else offsetSec * SLEW_GAIN
-        clockOffsetNs += Math.round(applied * 1e9)
+        val appliedNs = Math.round(applied * 1e9)
+        clockOffsetNs += appliedNs
         if (stepping) {
             delays.fill(Double.POSITIVE_INFINITY)
             delayIndex = 0
             pendingT1 = null
             synced = true
         }
+        return correctionDiagnostics?.record(appliedNs, stepping, selectedRttSec * 1_000.0)
     }
 
     private fun currentSocket(): DatagramSocket? = synchronized(socketLock) { socket }

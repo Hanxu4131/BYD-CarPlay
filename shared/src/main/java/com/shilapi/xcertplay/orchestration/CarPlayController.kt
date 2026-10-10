@@ -160,6 +160,9 @@ class CarPlayController(
     private enum class Phase { IDLE, MFI, WIRELESS, IPHONE, REENUMERATION, DATAPATHS, CONTROL }
 
     private val appContext = context.applicationContext
+    private val wifiProtection = com.shilapi.xcertplay.network.WirelessSessionWifiProtection.android(appContext) {
+        debugLog(it)
+    }
     private val usbManager = context.getSystemService(UsbManager::class.java)
     private val bluetoothAdapter =
         appContext.getSystemService(BluetoothManager::class.java)?.adapter
@@ -200,6 +203,16 @@ class CarPlayController(
     private var clusterUiStream: Pair<AirPlaySession, Int>? = null
     private var clusterUiShown = true
     private val playbackStatus = com.shilapi.xcertplay.media.CarPlayPlaybackStatus()
+    private val albumReplayLock = Any()
+    private var initialArtworkReplay: com.shilapi.xcertplay.transport.Iap2ArtworkTransfer? = null
+
+    fun nowPlayingSnapshot(): com.shilapi.xcertplay.media.CarPlayNowPlaying =
+        synchronized(playbackStatus) { playbackStatus.nowPlaying }
+
+    /** One bounded payload, never a nearest-cover guess when a reference is absent. */
+    fun matchingArtworkSnapshot(id: Int?): com.shilapi.xcertplay.transport.Iap2ArtworkTransfer? =
+        synchronized(albumReplayLock) { initialArtworkReplay?.takeIf { id != null && it.id == id } }
+
 
     /** Told when the iPhone starts or stops playing media; may run on any thread. */
     @Volatile var playbackListener: ((Boolean) -> Unit)? = null
@@ -251,6 +264,7 @@ class CarPlayController(
 
     private val sessionListener = object : AirPlaySessionListener {
         override fun onSessionActive(session: AirPlaySession) {
+            wifiProtection.sessionActive(session, isWirelessTransport())
             if (activeSession !== session) {
                 BydNavigationOutputs.start(appContext)
                 com.shilapi.xcertplay.glance.CarPlayGlance.setConnected(true)
@@ -266,12 +280,17 @@ class CarPlayController(
         }
 
         override fun onSessionEnded(session: AirPlaySession) {
+            wifiProtection.sessionEnded(session)
             if (activeSession === session) {
                 activeSession = null
                 BydNavigationOutputs.endNow()
-                com.shilapi.xcertplay.glance.CarPlayGlance.setConnected(false)
+                com.shilapi.xcertplay.glance.CarPlayGlance.setConnected(
+                    false,
+                    preserveTurnOverlay = !closed && isWirelessTransport(),
+                )
                 videoListener?.onVideoSessionEnded()
                 synchronized(playbackStatus) {
+                    synchronized(albumReplayLock) { initialArtworkReplay = null }
                     val wasPlaying = playbackStatus.playing
                     playbackStatus.clearAll()?.let { it to wasPlaying }
                 }?.let { (cleared, wasPlaying) ->
@@ -472,6 +491,8 @@ class CarPlayController(
             if (closed) return
             closed = true
         }
+        wifiProtection.close()
+        synchronized(albumReplayLock) { initialArtworkReplay = null }
         videoGate?.close()
         BydNavigationOutputs.endNow()
         com.shilapi.xcertplay.glance.CarPlayGlance.setConnected(false)
@@ -559,7 +580,48 @@ class CarPlayController(
         }
     }
 
+    enum class InitialAlbumRefreshResult { SENT, FAILED, CLOSED, INACTIVE_SESSION, CANCELLED, CHANNEL_UNAVAILABLE }
+
+    /** Existing metadata channel and worker; the caller owns the single-send budget. */
+    fun refreshInitialNowPlaying(
+        stillNeeded: () -> Boolean,
+        beforeSend: () -> Boolean = { true },
+        onFinished: (InitialAlbumRefreshResult) -> Unit = {},
+    ) {
+        Thread({
+            var result = InitialAlbumRefreshResult.CANCELLED
+            try {
+                if (closed) { result = InitialAlbumRefreshResult.CLOSED; return@Thread }
+                if (activeSession == null) { result = InitialAlbumRefreshResult.INACTIVE_SESSION; return@Thread }
+                if (!stillNeeded()) return@Thread
+                // The RFCOMM bootstrap is not the runtime metadata channel after wireless handoff.
+                val channel = if (config.transport == CarPlayTransport.WIRELESS) wirelessTunnelChannel else csm
+                if (channel == null) {
+                    result = InitialAlbumRefreshResult.CHANNEL_UNAVAILABLE
+                    debugLog("album recovery skipped channel=unavailable")
+                    return@Thread
+                }
+                if (closed) { result = InitialAlbumRefreshResult.CLOSED; return@Thread }
+                if (!stillNeeded() || !beforeSend()) return@Thread
+                // Claim only at the send boundary; preflight skips leave the budget intact.
+                result = InitialAlbumRefreshResult.FAILED
+                channel.send(com.shilapi.xcertplay.iap2.message.Iap2ControlMessages.startNowPlayingUpdates(), 250)
+                result = InitialAlbumRefreshResult.SENT
+                debugLog("album recovery subscription sent")
+            } catch (error: Exception) {
+                debugLog("album recovery subscription failed type=${error.javaClass.simpleName}")
+            } finally {
+                onFinished(result)
+            }
+        }, "diplay-initial-album-refresh").apply { isDaemon = true }.start()
+    }
+
     private fun onArtworkTransfer(transfer: com.shilapi.xcertplay.transport.Iap2ArtworkTransfer) {
+        if (closed) return
+        synchronized(albumReplayLock) {
+            // The receiver already bounds transfers; retaining only 1 MiB keeps replay inexpensive.
+            initialArtworkReplay = transfer.takeIf { !closed && it.bytes.size <= 1024 * 1024 }
+        }
         debugLog("iap2 artwork transfer id=0x${transfer.id.toString(16)} bytes=${transfer.bytes.size}")
         artworkListener?.invoke(transfer.id, transfer.bytes)
     }
@@ -1243,6 +1305,8 @@ class CarPlayController(
             }
 
             override fun onSessionEnded(session: AirPlaySession) {
+                // The owner guard also handles an ended session from an obsolete run.
+                wifiProtection.sessionEnded(session)
                 if (isStaleWirelessRun(generation)) return
                 wirelessConnectionProof.end(generation, session)
                 sessionListener.onSessionEnded(session)

@@ -502,4 +502,8 @@
     <string name="navigation_wheel_service_name">BYD Carplay navigation wheel</string>
     <string name="navigation_wheel_service_settings">Enable navigation wheel service</string>
     <string name="navigation_wheel_service_description">Handles volume keys during navigation guidance; does not read screen content.</string>
+    <string name="main_buffered_audio">Buffered music</string>
+    <string name="main_buffered_audio_description">Supported music apps send audio ahead to reduce interruptions during short Wi-Fi gaps. Takes effect after reconnecting CarPlay; the music buffer setting still applies.</string>
+    <string name="map_follow_carplay_theme">Map follows CarPlay theme</string>
+    <string name="map_follow_carplay_theme_description">No reconnection required. Off leaves map appearance to the phone.</string>
 </resources>

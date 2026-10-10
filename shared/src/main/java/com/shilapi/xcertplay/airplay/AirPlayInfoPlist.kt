@@ -46,7 +46,7 @@ object AirPlayInfoPlist {
         )
         if (!config.disableAudioOutput) {
             info["audioLatencies"] = audioLatencies()
-            info["audioFormats"] = audioFormats(config.entertainmentSampleRate, config.microphone)
+            info["audioFormats"] = audioFormats(config.entertainmentSampleRate, config.microphone, config.mainBufferedAudio)
         }
         config.nightMode?.let { info["nightMode"] = it }
         info["extendedFeatures"] = listOf("vocoderInfo", "enhancedRequestCarUI")
@@ -70,6 +70,7 @@ object AirPlayInfoPlist {
             }
         }
         if (config.hevc) info["hevcInfo"] = emptyMap<String, Any?>()
+        if (config.bufferedAudioOutputEnabled) info["mainBufferedInfo"] = emptyMap<String, Any?>()
         if (config.videoInCar) {
             // The iPhone tears down a session that enables videoPlayback without this key.
             val legacy = if (config.disableAudioOutput) CARPLAY_FEATURES_NO_AUDIO else CARPLAY_FEATURES
@@ -116,6 +117,7 @@ object AirPlayInfoPlist {
     private fun audioFormats(
         entertainmentRate: Int,
         microphone: Boolean,
+        mainBuffered: Boolean = false,
     ): List<Map<String, Any?>> {
         fun format(type: Int, audioType: String, outputFormats: Int, inputFormats: Int? = null): Map<String, Any?> {
             val entry = linkedMapOf<String, Any?>(
@@ -146,7 +148,7 @@ object AirPlayInfoPlist {
             format(100, "speechRecognition", pcmMono or opus, wirelessInput),
             format(101, "default", pcm or opus),
             format(102, "media", aacLc),
-        )
+        ) + if (mainBuffered) listOf(format(BufferedAudioStream.STREAM_TYPE, "media", aacLc)) else emptyList()
     }
 
     private fun displayEntry(display: AirPlayDisplayConfig, type: Int, uuid: String): Map<String, Any?> {
@@ -180,6 +182,7 @@ object AirPlayInfoPlist {
 
         if (type == 110 && display.separateCornerMasks) entry["cornerMasks"] = true
         val areas = display.adaptiveViewAreas
+        if (type == 110 && areas.size > 1) entry["viewAreaTransitionControl"] = true
         if (type == 110 && areas.isNotEmpty()) {
             require(areas.size <= 4 && areas.all { it.valid(display.widthPixels, display.heightPixels) })
             require(display.initialViewArea in areas.indices)

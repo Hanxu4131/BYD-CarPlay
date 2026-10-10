@@ -24,7 +24,10 @@ object CarPlayGlance {
         val playing: Boolean = false,
     )
 
-    private val route = BydHudRouteState()
+    private val route = BydHudRouteState(
+        staleRouteNs = 120_000_000_000L,
+        keepAcrossNoRoute = true,
+    )
     private val song = ClusterSongState()
     private var connected = false
     private var last = Snapshot()
@@ -52,12 +55,12 @@ object CarPlayGlance {
         changed?.let { listener?.invoke(it) }
     }
 
-    fun setConnected(next: Boolean) {
+    fun setConnected(next: Boolean, preserveTurnOverlay: Boolean = false) {
         val changed = synchronized(this) {
-            if (connected == next) return
+            if (connected == next && (next || preserveTurnOverlay)) return
             connected = next
             if (!next) {
-                route.clear()
+                if (!preserveTurnOverlay) route.clear()
                 song.clear()
             }
             publishLocked()

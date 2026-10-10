@@ -8,6 +8,24 @@ import org.junit.Test
 
 class AirPlayInfoPlistTest {
     @Test
+    fun transitionControlIsOfferedOnlyForMultipleMainViewAreas() {
+        val main = AirPlayDisplayConfig(widthPixels = 1280, heightPixels = 720)
+        val config = AirPlayConfig(deviceName = "test", deviceId = "02:00:00:00:00:02",
+            btMac = "02:00:00:00:00:02", sourceVersion = "1.0", main = main)
+        for (areas in listOf(emptyList(), listOf(MainViewArea(1280, 720)),
+            listOf(MainViewArea(1280, 720), MainViewArea(640, 720)))) {
+            val display = main.copy(adaptiveViewAreas = areas)
+            val info = BplistCodec.decode(BplistCodec.encode(AirPlayInfoPlist.build(
+                config.copy(main = display, cluster = display)))) as Map<*, *>
+            val displays = (info["displays"] as List<*>).map { it as Map<*, *> }
+            if (areas.size > 1) assertEquals(true, displays[0]["viewAreaTransitionControl"])
+            else assertFalse(displays[0].containsKey("viewAreaTransitionControl"))
+            assertFalse(displays[1].containsKey("viewAreaTransitionControl"))
+        }
+    }
+
+
+    @Test
     fun bothDisplaysDeclareAutomaticUiAndMapAppearanceOnTheWire() {
         val config = AirPlayConfig(
             deviceName = "test", deviceId = "02:00:00:00:00:02", btMac = "02:00:00:00:00:02",

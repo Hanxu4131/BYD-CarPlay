@@ -373,6 +373,9 @@ class CarPlayHostActivity : ComponentActivity() {
     private var menuOpen = false
     private var latestStage = "Preparing CarPlay"
     private var darkMode = false
+    private var mapFollowUi = true
+    private var appliedMapFollowUi: Boolean? = null
+    private var requestedMapFollowUi: Boolean? = null
     private val appearanceReader by lazy { HeadUnitAppearanceReader(applicationContext) }
     private var lastAppearanceSample: HeadUnitAppearanceSample? = null
     private var appliedAppearance: HeadUnitAppearance? = null
@@ -586,6 +589,7 @@ class CarPlayHostActivity : ComponentActivity() {
         model = AirPlayPersistence.loadModel(this)
         oemLabel = AirPlayPersistence.loadOemLabel(this)
         fps = AirPlayPersistence.loadFps(this)
+        mapFollowUi = AirPlayPersistence.loadMapFollowUi(this)
         widthPhysicalMm = AirPlayPersistence.loadWidthPhysicalMm(this)
         physicalSizeBasis = AirPlayPersistence.loadPhysicalSizeBasis(this)
         AirPlayPersistence.loadMaximumDetectedDisplay(this).let { (width, height) ->
@@ -1100,14 +1104,19 @@ class CarPlayHostActivity : ComponentActivity() {
         NavigationWheelRoutingState.attach(owner) {
             val current = CarPlayBackgroundSession.snapshot()
             val playback = NavigationPlayback.snapshot()
-            NavigationWheelSessionPolicy.canRoute(
-                AirPlayPersistence.loadNavigationVolumeWheelEnabled(app),
-                CarPlayBackgroundSession.isOwner(owner) && current != null && current.controller === expectedController && current.sink === expectedSink,
-                expectedController.hasActiveAirPlaySession(), playback.active, playback.legacyStreamType,
-                true, expectedSink.hasPriorityVoiceAudio(), runCatching {
-                    app.getSystemService(AudioManager::class.java)?.mode == AudioManager.MODE_NORMAL
-                }.getOrDefault(false),
+            val enabled = AirPlayPersistence.loadNavigationVolumeWheelEnabled(app)
+            val owned = CarPlayBackgroundSession.isOwner(owner) && current != null && current.controller === expectedController && current.sink === expectedSink
+            val connected = expectedController.hasActiveAirPlaySession()
+            val priorityVoice = expectedSink.hasPriorityVoiceAudio()
+            val normalMode = runCatching {
+                app.getSystemService(AudioManager::class.java)?.mode == AudioManager.MODE_NORMAL
+            }.getOrDefault(false)
+            val eligible = NavigationWheelSessionPolicy.canRoute(
+                enabled, owned, connected, playback.active, playback.legacyStreamType,
+                true, priorityVoice, normalMode,
             )
+            if (!eligible && enabled) Log.i("DiPlay-NavWheel", "route declined owner=$owned connected=$connected navigation=${playback.active} stream=${playback.legacyStreamType} priorityVoice=$priorityVoice normalMode=$normalMode")
+            eligible
         }
     }
 
@@ -1414,6 +1423,29 @@ class CarPlayHostActivity : ComponentActivity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
             ).apply { topMargin = dp(40) },
+        )
+
+        content.addView(
+            settingsSwitchRow(
+                label = getString(R.string.map_follow_carplay_theme),
+                checked = mapFollowUi,
+                description = getString(R.string.map_follow_carplay_theme_description),
+            ) { value ->
+                mapFollowUi = value
+                AirPlayPersistence.saveMapFollowUi(this, value)
+                syncAirPlayDarkMode(force = true)
+            },
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(14) },
+        )
+        content.addView(
+            menuText(getString(R.string.map_follow_carplay_theme_description), 15f, MENU_SECONDARY),
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+            ).apply { topMargin = dp(8) },
         )
 
         val resolutionHeader = LinearLayout(this).apply {
@@ -3161,6 +3193,8 @@ class CarPlayHostActivity : ComponentActivity() {
             oemLabel = oemLabel,
             icons = listOf(loadAirPlayIcon()),
             videoInCar = com.shilapi.xcertplay.hud.BydOutputSettings.videoWhileParked(this),
+            mainBufferedAudio = AirPlayPersistence.loadMainBufferedAudio(this),
+            mainBufferedStartLatencyMillis = AirPlayPersistence.loadMediaBufferMillis(this) + 100,
         )
     }
 
@@ -3327,6 +3361,7 @@ class CarPlayHostActivity : ComponentActivity() {
             preferSoftwareHevcDecoder = hevcSoftwareDecoderEnabled,
             advancedAudioChannelMapping = advancedAudioChannelMapping,
             audioFocusEnabled = AirPlayPersistence.loadAudioFocusEnabled(this),
+            audioFocusAutoYield = AirPlayPersistence.loadAudioFocusAutoYield(this),
             microphoneProcessing = {
                 MicrophoneDiagnosticOverride.load(this, com.shilapi.xcertplay.media.MicrophoneProcessing(
                     noiseSuppression = AirPlayPersistence.loadMicrophoneNoiseSuppression(this),
@@ -3653,8 +3688,11 @@ class CarPlayHostActivity : ComponentActivity() {
         }
         // Undefined vendor state does not authorize a spurious light-mode update.
         appearance ?: return
-        if (requestedAppearance?.night != appearance.night || requestedAppearance?.manual != appearance.manual) {
+        val followUi = mapFollowUi
+        if (requestedAppearance?.night != appearance.night || requestedAppearance?.manual != appearance.manual ||
+            requestedMapFollowUi != followUi) {
             requestedAppearance = appearance
+            requestedMapFollowUi = followUi
             appearanceRefresh.request(SystemClock.elapsedRealtime())
             // An opposite update may already be writing; send the latest mode even when it matches an older success.
             appliedAppearance = null
@@ -3662,20 +3700,22 @@ class CarPlayHostActivity : ComponentActivity() {
         val sendRequestedAtMillis = SystemClock.elapsedRealtime()
         val retryAppearance = appearanceRefresh.isDue(sendRequestedAtMillis)
         if (!force && !retryAppearance &&
-            appliedAppearance?.night == appearance.night && appliedAppearance?.manual == appearance.manual) return
+            appliedAppearance?.night == appearance.night && appliedAppearance?.manual == appearance.manual &&
+            appliedMapFollowUi == followUi) return
         darkMode = appearance.night
         val generation = ++appearanceGeneration
         airPlayCommandExecutor.execute {
             if (generation != appearanceGeneration) return@execute
             try {
-                val sent = session.setAppearance(appearance.night, appearance.manual)
+                val sent = session.setAppearance(appearance.night, appearance.manual, mapFollowUi = followUi)
                 if (sent) mainHandler.post {
                     if (generation == appearanceGeneration && activeAirPlaySession === session) {
                         appliedAppearance = appearance
+                        appliedMapFollowUi = followUi
                         appearanceRefresh.sent(sendRequestedAtMillis)
                     }
                 }
-                val report = "CarPlay appearance night=${appearance.night} manual=${appearance.manual} eventChannelReady=$sent resync=$retryAppearance"
+                val report = "CarPlay appearance night=${appearance.night} manual=${appearance.manual} mapFollowUi=$followUi eventChannelReady=$sent resync=$retryAppearance"
                 if (lastAppearanceSendReport != report) {
                     lastAppearanceSendReport = report
                     appendLog(report)

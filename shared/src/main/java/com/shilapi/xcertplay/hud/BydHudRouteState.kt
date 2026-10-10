@@ -27,7 +27,12 @@ internal enum class BydHudRouteChange {
 }
 
 /** Decodes the iAP2 route-guidance subset needed by the BYD windshield HUD and cluster. */
-internal class BydHudRouteState(private val nanoTime: () -> Long = System::nanoTime) {
+internal class BydHudRouteState(
+    private val nanoTime: () -> Long = System::nanoTime,
+    private val staleRouteNs: Long = STALE_ROUTE_NS,
+    private val emptyListHideNs: Long = EMPTY_LIST_HIDE_NS,
+    private val keepAcrossNoRoute: Boolean = false,
+) {
     private data class Maneuver(val type: Int, val drivingSide: Int, val afterRoad: String)
 
     private val maneuvers = mutableMapOf<Int, Maneuver>()
@@ -89,9 +94,9 @@ internal class BydHudRouteState(private val nanoTime: () -> Long = System::nanoT
     private fun activeManeuver(): Maneuver? {
         if (!routeActive || activeIndex < 0) return null
         val updated = lastRouteUpdateNs ?: return null
-        if (nanoTime() - updated >= STALE_ROUTE_NS) return null
+        if (nanoTime() - updated >= staleRouteNs) return null
         val emptySince = emptyListSinceNs
-        if (emptySince != null && nanoTime() - emptySince >= EMPTY_LIST_HIDE_NS) return null
+        if (emptySince != null && nanoTime() - emptySince >= emptyListHideNs) return null
         return maneuvers[activeIndex]
     }
 
@@ -99,6 +104,9 @@ internal class BydHudRouteState(private val nanoTime: () -> Long = System::nanoT
     private fun roadFor(maneuver: Maneuver): String = maneuver.afterRoad.ifEmpty { currentRoad }
 
     private fun parseRouteUpdate(data: ByteArray): BydHudRouteChange {
+        // NoRouteSet can be a wireless tunnel teardown marker. It must not mutate the retained
+        // overlay or refresh its stale deadline; explicit arrival still clears it below.
+        if (keepAcrossNoRoute && containsNoRouteSet(data)) return BydHudRouteChange.NONE
         lastRouteUpdateNs = nanoTime()
         var state: Int? = null
         var distance: Int? = null
@@ -140,6 +148,14 @@ internal class BydHudRouteState(private val nanoTime: () -> Long = System::nanoT
         }
         if (distance != null) distanceMeters = distance!!.coerceAtLeast(0)
         return if (current() != null) BydHudRouteChange.GUIDANCE else BydHudRouteChange.NONE
+    }
+
+    private fun containsNoRouteSet(data: ByteArray): Boolean {
+        var found = false
+        forEachTlv(data) { type, value, valueLength ->
+            if (type == 0x01 && valueLength >= 1 && data[value].toInt() == 0) found = true
+        }
+        return found
     }
 
     private fun parseManeuverUpdate(data: ByteArray): BydHudRouteChange {

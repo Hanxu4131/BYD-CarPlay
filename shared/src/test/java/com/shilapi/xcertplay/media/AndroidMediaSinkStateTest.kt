@@ -31,4 +31,15 @@ class AndroidMediaSinkStateTest {
         sink.setScreenStreamActiveChangedListener { type, active -> afterClose.add(type to active) }
         assertTrue(afterClose.isEmpty())
     }
+
+    @Test fun playbackParameterSnapshotKeepsValuesAndContainsPlatformFailures() {
+        assertEquals(
+            PlaybackParamsSnapshot(1.25f, 0.9f),
+            PlaybackParamsSnapshot.capture { 1.25f to 0.9f },
+        )
+        assertEquals(
+            "playbackSpeed=unavailable playbackPitch=unavailable",
+            PlaybackParamsSnapshot.capture { error("PlaybackParams unavailable") }.logFields(),
+        )
+    }
 }

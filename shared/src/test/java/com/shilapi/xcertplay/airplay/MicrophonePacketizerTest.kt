@@ -3,6 +3,7 @@ package com.shilapi.xcertplay.airplay
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import java.net.InetAddress
 
 class MicrophonePacketizerTest {
     @Test
@@ -49,4 +50,43 @@ class MicrophonePacketizerTest {
             ),
         )
     }
+
+    @Test
+    fun observedSiriOpusUses24KhzRtpClockWithoutChanging48KhzCapture() {
+        assertEquals(24_000, MicrophoneConfig.opusClockRate(0x20000000L))
+        assertEquals(48_000, MicrophoneConfig.opusClockRate(0x40000000L))
+        assertEquals(48_000, MicrophoneConfig.opusClockRate(0x10000000L))
+        assertEquals(48_000, MicrophoneConfig.opusClockRate(0L))
+
+        val siri = config(opusClockRate = MicrophoneConfig.opusClockRate(0x20000000L))
+        assertEquals(960, siri.samplesPerPacket)
+        assertEquals(1920, siri.frameBytes)
+        assertEquals(480, siri.rtpSamplesPerPacket)
+        assertEquals(960, config().rtpSamplesPerPacket)
+
+        val counters = MicrophoneCounters()
+        repeat(3) { index ->
+            val packet = MicrophonePacketizer.sealPacket(
+                ByteArray(32) { (it + 1).toByte() }, 100, counters,
+                byteArrayOf(0xf8.toByte(), index.toByte()), siri.rtpSamplesPerPacket,
+            )
+            val timestamp = java.nio.ByteBuffer.wrap(packet, 4, 4)
+                .order(java.nio.ByteOrder.BIG_ENDIAN).int
+            assertEquals(index * 480, timestamp)
+        }
+        assertEquals(1440, counters.timestamp)
+    }
+
+    private fun config(opusClockRate: Int = 48_000) = MicrophoneConfig(
+        audioType = "speechrecognition",
+        sampleRate = 48_000,
+        channels = 1,
+        payloadType = 100,
+        frameMillis = 20,
+        host = InetAddress.getLoopbackAddress(),
+        port = 1,
+        key = ByteArray(32),
+        codec = AudioCodecKind.OPUS,
+        opusClockRate = opusClockRate,
+    )
 }
